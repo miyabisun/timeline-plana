@@ -6,9 +6,11 @@ We use a **Feature-Sliced** inspired approach for Frontend and a **Modular** app
 
 ### Frontend (`src/`)
 
-- **`features/`**: Code organized by business domain (e.g., `timeline`, `settings`). Each feature is self-contained.
-- **`components/`**: Shared UI primitives (`ui`) and layout components (`layout`).
-- **`stores/`**: Global state management (Zustand/Jotai).
+- **`features/`**: (Planned) Code organized by business domain.
+- **`components/`**:
+  - **`layout/`**: Structural components (e.g., `ConnectionPanel`, `SettingsPanel`).
+  - **`ui/`**: (Planned) Reusable UI primitives.
+- **`stores/`**: Global state management.
 - **`lib/`**: Generic utilities not tied to React.
 
 ### Backend (`src-tauri/src/`)
@@ -16,7 +18,6 @@ We use a **Feature-Sliced** inspired approach for Frontend and a **Modular** app
 - **`commands/`**: The interface layer. Functions exposed to the Frontend via Tauri's invoke system. **No heavy logic here.**
 - **`core/`**: Pure Rust business logic. Independent of Tauri where possible.
   - `visual_intercept.rs`: Screen capture logic using Windows Graphics Capture API.
-  - `mjpeg.rs`: Lightweight HTTP server for streaming captured frames.
 - **`state/`**: Application state definitions (Mutex, Arc, etc.).
 
 ## Design Principles
@@ -24,6 +25,15 @@ We use a **Feature-Sliced** inspired approach for Frontend and a **Modular** app
 1. **Separation of Concerns**: Frontend handles UI/State, Backend handles System/Computation.
 2. **Type Safety**: Aggressively use TypeScript and Rust types to ensure correctness.
 3. **Aesthetics**: Code should be as beautiful as the UI.
+4. **Theme Support**: First-class Dark Mode support (via Tailwind v4 `selector` strategy).
+5. **Code Identity**: This application is Plana herself.
+   - **Iron Rule**: New modules in `src-tauri/src/core/` MUST be named as actions performed by Plana to assist the Sensei (Player).
+   - Examples:
+     - `visual_intercept.rs` (Visual Information Interception)
+     - `combat_intel.rs` (Combat Intelligence Analysis)
+     - `countdown_monitor.rs` (Countdown Monitoring)
+     - `target_acquisition.rs` (Target Acquisition)
+   - Avoid generic names like `utils.rs` or `manager.rs`. Plana doesn't "manage"; she *analyzes*, *intercepts*, *calculates*, and *assists*.
 
 ## Core Systems
 
@@ -33,7 +43,6 @@ We employ a high-performance, low-latency capture pipeline optimized for Blue Ar
 
 - **Capture Engine**: Microsoft Windows Graphics Capture API (via `windows-capture` crate).
 - **Cropping**: Manual calculation of Client Area using Win32 API (`GetClientRect`, `ClientToScreen`) to exclude title bars and borders reliably across window modes.
-- **Dual-Rate Architecture**:
+- **Single-Stream Architecture**:
   - **Internal Processing**: Runs at **30 FPS**. This stream allows the backend to perform precise OCR analysis (for time/HP).
-  - **Video Streaming**: Runs at **15 FPS** (Quality 95 MJPEG). This stream is served via HTTP to the frontend for visual confirmation. This separation minimizes CPU/Network load while maintaining data precision.
-- **Streaming Protocol**: standard MJPEG over HTTP (multipart/x-mixed-replace). Served by `tiny_http` on port `12345` (default).
+  - **Streaming**: Disabled. We removed the MJPEG stream to minimize CPU/Thread contention and ensure OCR runs at peak performance.
