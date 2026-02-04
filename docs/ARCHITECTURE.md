@@ -32,8 +32,14 @@ We use a **Feature-Sliced** inspired approach for Frontend and a **Modular** app
      - `visual_intercept.rs` (Visual Information Interception)
      - `combat_intel.rs` (Combat Intelligence Analysis)
      - `countdown_monitor.rs` (Countdown Monitoring)
+     - `shittim_link.rs` (Shittim Chest Connectivity)
      - `target_acquisition.rs` (Target Acquisition)
    - Avoid generic names like `utils.rs` or `manager.rs`. Plana doesn't "manage"; she *analyzes*, *intercepts*, *calculates*, and *assists*.
+
+6. **Concept & Setting**:
+   - **Backend (Tauri)**: **Plana** (AI Operator). She runs the core logic, intercepts the system, and calculating combat data.
+   - **Frontend (React)**: **The Shittim Chest** (Performance Tablet). The interface presented to the Sensei (Player).
+   - **Interaction**: Plana intercepts the "Shittim Chest" OS to overlay tactical advice and real-time battle data via the **Shittim Link** layer.
 
 ## Core Systems
 

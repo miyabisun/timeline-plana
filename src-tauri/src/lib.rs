@@ -13,8 +13,10 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let debug_state = Arc::new(DebugState::new());
-            // Manage the state so other threads (capture) can access it
             app.manage(debug_state);
+
+            let interceptor_manager = core::visual_intercept::InterceptorManager::new();
+            app.manage(interceptor_manager);
 
             Ok(())
         })

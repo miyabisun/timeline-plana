@@ -4,7 +4,30 @@ import DebugPanel from "./components/layout/DebugPanel";
 import TimelinePanel from "./components/layout/TimelinePanel";
 import SettingsPanel from "./components/layout/SettingsPanel";
 import { Activity, Bug, Settings, LayoutDashboard } from "lucide-react";
+import { listen } from '@tauri-apps/api/event';
 import "./App.css";
+
+export interface ProcessCandidate {
+  pid: number;
+  name: string;
+  window_title: string;
+  hwnd: number;
+}
+
+export interface ShittimPayload {
+  battle_state: string;
+  fps: number;
+  stats?: {
+    received: number;
+    accepted: number;
+    queue_full: number;
+  };
+  timer: null | {
+    minutes: number;
+    seconds: number;
+    milliseconds: number;
+  };
+}
 
 export type Theme = 'auto' | 'light' | 'dark';
 
@@ -48,6 +71,21 @@ function App() {
 
     return () => mediaQuery.removeEventListener('change', handleChange);
   }, [theme]);
+
+  // Global State for Shittim Link (Bubbled up to share between panels)
+  const [shittimData, setShittimData] = useState<ShittimPayload | null>(null);
+  const [targetInfo, setTargetInfo] = useState<ProcessCandidate | null>(null);
+
+  // Listen to Shittim Link globally (persists across tab switches)
+  useEffect(() => {
+    const unlistenPromise = listen<ShittimPayload>('link-sync', (event) => {
+      setShittimData(event.payload);
+    });
+
+    return () => {
+      unlistenPromise.then(unlisten => unlisten());
+    };
+  }, []);
 
   return (
     <main className="flex flex-col h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 font-sans transition-colors duration-300">
@@ -106,7 +144,11 @@ function App() {
       <div className="flex-1 overflow-auto bg-slate-200/50 dark:bg-slate-950 transition-colors duration-300">
         {activeTab === "check" && (
           <div className="p-4 h-full">
-            <ConnectionPanel />
+            <ConnectionPanel
+              shittimData={shittimData}
+              targetInfo={targetInfo}
+              setTargetInfo={setTargetInfo}
+            />
           </div>
         )}
 
@@ -114,7 +156,10 @@ function App() {
 
         {activeTab === "debug" && (
           <div className="p-4 h-full">
-            <DebugPanel />
+            <DebugPanel
+              shittimData={shittimData}
+              targetInfo={targetInfo}
+            />
           </div>
         )}
 

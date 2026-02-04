@@ -52,6 +52,67 @@ pub fn analyze_battle_state(rgb_data: &[u8], width: u32, height: u32) -> BattleS
     }
 }
 
+/// Check if the pause button is visible in the Wide ROI (85-100% width).
+///
+/// # Arguments
+/// * `rgb_data` - The cropped RGB data containing the 85-100% strip.
+/// * `width` - Width of the strip.
+/// * `height` - Height of the strip.
+pub fn check_pause_presence_in_wide_roi(rgb_data: &[u8], width: u32, height: u32) -> bool {
+    // We only need to scan the RIGHT SIDE of this strip for the pause button.
+    // The strip covers 0.85 to 1.00.
+    // Pause button is at 0.92 to 1.00.
+    // 0.92 is roughly (0.92 - 0.85) / (1.00 - 0.85) = 0.07 / 0.15 = 46.6% mark.
+
+    // Scan from 50% to 100% of this strip to be safe.
+    let roi_x_start = width / 2;
+    let roi_x_end = width;
+
+    // Height: Pause button is at top 5%.
+    let roi_y_start = (height as f32 * 0.005) as u32;
+    let roi_y_end = (height as f32 * 0.20) as u32; // Scan a bit deeper just in case
+
+    let mut blue_pixel_count = 0u32;
+    let mut white_pixel_count = 0u32;
+    let mut total_pixels = 0u32;
+
+    for y in (roi_y_start..roi_y_end).step_by(2) {
+        for x in (roi_x_start..roi_x_end).step_by(2) {
+            let idx = ((y * width + x) * 3) as usize;
+            if idx + 2 >= rgb_data.len() {
+                continue;
+            }
+
+            let r = rgb_data[idx] as i32;
+            let g = rgb_data[idx + 1] as i32;
+            let b = rgb_data[idx + 2] as i32;
+
+            total_pixels += 1;
+
+            // Blue Archive pause button uses a dark blue
+            let is_bluish = b > 150 && b > r + 20 && b > g;
+            // White II bars
+            let is_white = r > 200 && g > 200 && b > 200;
+
+            if is_bluish {
+                // blue_pixel_count += 1; // Unused for now
+            }
+            if is_white {
+                white_pixel_count += 1;
+            }
+        }
+    }
+
+    if total_pixels == 0 {
+        return false;
+    }
+
+    let white_ratio = white_pixel_count as f32 / total_pixels as f32;
+
+    // Threshold: Active battle has clear white pixels (> 5%) for the button icon
+    white_ratio > 0.05
+}
+
 /// Check if the pause button (II icon) or timer UI is visible in the top-right corner.
 /// We detect this by looking for white pixels (timer text, pause button icon).
 #[allow(dead_code)]

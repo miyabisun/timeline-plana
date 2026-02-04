@@ -20,19 +20,22 @@ use windows_capture::{
 };
 
 // Struct to manage the capture state
+use std::sync::atomic::{AtomicBool, Ordering};
+
+// Struct to manage the capture state
 pub struct InterceptorManager {
-    pub is_capturing: Arc<Mutex<bool>>,
+    // Shared flag to track if a capture is currently running
+    pub is_running: Arc<AtomicBool>,
+    // Flag to signal stop request (for future use)
+    pub should_stop: Arc<AtomicBool>,
 }
 
 impl InterceptorManager {
     pub fn new() -> Self {
         Self {
-            is_capturing: Arc::new(Mutex::new(false)),
+            is_running: Arc::new(AtomicBool::new(false)),
+            should_stop: Arc::new(AtomicBool::new(false)),
         }
-    }
-
-    pub fn start_intercept(&self, hwnd: usize) {
-        println!("Starting intercept on HWND: {}", hwnd);
     }
 }
 
@@ -53,25 +56,29 @@ struct CapturePayload {
 }
 
 // Status payload sent to Frontend
-#[derive(Clone, serde::Serialize)]
-struct CaptureStatus {
-    window_width: u32,
-    window_height: u32,
-    battle_state: String, // "Active", "Paused", "Inactive"
-    fps: f64,
-}
+// Status payload moved to shittim_link
+// #[derive(Clone, serde::Serialize)]
+// struct CaptureStatus { ... }
 
 // Handler for the capture event loop (Producer)
 struct CaptureHandler {
     last_frame_time: Instant,
     // Conflating Queue: Mutex holds the *latest* frame. Condvar notifies consumer.
     latest_frame: Arc<(Mutex<Option<CapturePayload>>, Condvar)>,
+    // Shared Stats: Updated by Producer, Read by Consumer
+    shared_stats: Arc<Mutex<Option<crate::core::shittim_link::CaptureStats>>>,
     hwnd: usize,
     // FPS Counter for debugging
     fps_counter_received: u64, // Total frames received from OS
     fps_counter_accepted: u64, // Frames passed to worker (after throttle)
     fps_queue_full: u64,       // Times queue was full (worker busy)
     fps_last_log_time: Instant,
+}
+
+// Struct to hold state inside the logic loop to persist between iterations
+struct LogicState {
+    last_active_time: Instant,
+    current_battle_state: BattleState,
 }
 
 impl GraphicsCaptureApiHandler for CaptureHandler {
@@ -88,14 +95,22 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
         let latest_frame = Arc::new((Mutex::new(Option::<CapturePayload>::None), Condvar::new()));
         let consumer_frame = latest_frame.clone();
 
+        // Shared Stats
+        let shared_stats = Arc::new(Mutex::new(None));
+        let consumer_stats = shared_stats.clone();
+
         // Spawn the Worker Thread (Consumer)
         thread::spawn(move || {
             println!("Worker Thread (Consumer) started");
             let (lock, cvar) = &*consumer_frame;
 
             // State Cache Mechanism
-            let mut frame_count: u64 = 0;
-            let mut cached_battle_state = BattleState::Inactive;
+            // let mut frame_count: u64 = 0; // Unused
+            // let mut cached_battle_state = BattleState::Inactive; (Replaced by LogicState)
+            let mut logic_state = LogicState {
+                last_active_time: Instant::now(),
+                current_battle_state: BattleState::Inactive,
+            };
 
             loop {
                 // Wait for a new frame
@@ -112,17 +127,8 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                 let height = payload.roi_height;
                 let _now = Instant::now();
 
-                // 0. Status Update (1Hz)
-                if frame_count % 30 == 0 {
-                    let status = CaptureStatus {
-                        window_width: payload.window_width,
-                        window_height: payload.window_height,
-                        battle_state: format!("{:?}", cached_battle_state),
-                        fps: 30.0, // Placeholder, calculated properly elsewhere or static limit
-                    };
-                    let _ = app_handle.emit("capture-status", &status);
-                }
-                frame_count += 1;
+                // 0. Status Update (Integrated into Shittim Link below)
+                // frame_count += 1; // Unused
 
                 // 1. Check for Screenshot Request
                 {
@@ -190,19 +196,68 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                     }
                 }
 
-                // 3. Battle State Analysis (SKIPPED due to Optimization)
-                // We only have the Timer ROI, so we cannot analyze full-screen UI (buttons etc).
-                // We assume BattleState::Active to ensure Timer OCR always runs.
-                let battle_state = BattleState::Active;
-                cached_battle_state = battle_state;
-
-                // 4. Timer OCR
-                // Use specialized function for pre-cropped ROI to avoid double-cropping
-                if let Some(timer) = crate::core::countdown_monitor::recognize_timer_from_roi(
+                // 3. Battle State Analysis
+                // The ROI is now 85-100% of the screen.
+                // Right part contains the Pause Button.
+                let is_pause_visible = crate::core::combat_intel::check_pause_presence_in_wide_roi(
                     &rgb_data, width, height,
-                ) {
-                    let _ = app_handle.emit("timer-update", &timer);
+                );
+
+                if is_pause_visible {
+                    logic_state.last_active_time = Instant::now();
+                    logic_state.current_battle_state = BattleState::Active;
+                } else {
+                    // Persistence: Only switch to Inactive if pause button missing for > 2.0s
+                    if logic_state.last_active_time.elapsed() > Duration::from_secs(2) {
+                        logic_state.current_battle_state = BattleState::Inactive;
+                    }
+                    // Otherwise keep previous state (hysteresis)
                 }
+
+                // 4. Timer OCR & Shittim Sync
+                let mut current_timer: Option<crate::core::countdown_monitor::TimerValue> = None;
+
+                if logic_state.current_battle_state == BattleState::Active {
+                    // ... (Timer Extraction Code) ...
+                    // We must SUB-CROP the Timer part to pass to countdown_monitor
+                    // Capture is 85-100% (Width = 15%)
+                    // Timer is 85-93% (Width = 8%)
+                    // Timer width relative to capture width: 8/15
+                    let timer_cols = (width as f32 * (0.08 / 0.15)) as u32;
+                    let timer_cols = timer_cols.min(width); // Safety cap
+
+                    // Extract logic (copying to new buffer for OCR API)
+                    let mut timer_data = Vec::with_capacity((timer_cols * height * 3) as usize);
+                    for y in 0..height {
+                        let row_start = (y * width) as usize * 3;
+                        let row_end = row_start + (timer_cols as usize * 3);
+                        timer_data.extend_from_slice(&rgb_data[row_start..row_end]);
+                    }
+
+                    // Use specialized function for pre-cropped ROI
+                    if let Some(timer) = crate::core::countdown_monitor::recognize_timer_from_roi(
+                        &timer_data,
+                        timer_cols,
+                        height,
+                    ) {
+                        current_timer = Some(timer);
+                    }
+                }
+
+                // 5. Shittim Link Sync (30FPS)
+                // Read latest stats from producer
+                let current_stats = {
+                    let mut guard = consumer_stats.lock().unwrap();
+                    guard.clone()
+                };
+
+                crate::core::shittim_link::sync_to_chest(
+                    &app_handle,
+                    &format!("{:?}", logic_state.current_battle_state),
+                    current_timer,
+                    30.0, // Stable FPS goal
+                    current_stats,
+                );
                 // 5. MJPEG Streaming - REMOVED
             }
             // The loop is infinite, so this line is unreachable unless the thread panics or is explicitly stopped.
@@ -213,6 +268,7 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
         Ok(Self {
             last_frame_time: Instant::now(),
             latest_frame,
+            shared_stats,
             hwnd: ctx.flags.hwnd,
             fps_counter_received: 0,
             fps_counter_accepted: 0,
@@ -235,11 +291,23 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
             let received_fps = self.fps_counter_received as f64 / elapsed;
             let accepted_fps = self.fps_counter_accepted as f64 / elapsed;
             let queue_full = self.fps_queue_full;
-            let total_push = self.fps_counter_accepted;
-            println!(
-                "[FPS] Received: {:.1}, Accepted: {:.1}, QueueFull: {}/{}",
-                received_fps, accepted_fps, queue_full, total_push
-            );
+            let queue_full = self.fps_queue_full;
+            // let total_push = self.fps_counter_accepted;
+
+            // Update shared stats instead of printing
+            {
+                let mut stats_guard = self.shared_stats.lock().unwrap();
+                *stats_guard = Some(crate::core::shittim_link::CaptureStats {
+                    received: received_fps,
+                    accepted: accepted_fps,
+                    queue_full: queue_full,
+                });
+            }
+
+            // println!(
+            //     "[FPS] Received: {:.1}, Accepted: {:.1}, QueueFull: {}/{}",
+            //     received_fps, accepted_fps, queue_full, total_push
+            // );
             self.fps_counter_received = 0;
             self.fps_queue_full = 0;
             self.fps_counter_accepted = 0;
@@ -298,10 +366,12 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
             let full_height = buffer.height();
 
             if let Ok(packed_slice) = buffer.as_nopadding_buffer() {
-                // OPTIMIZATION: Copy only Timer ROI instead of full frame
-                // Timer ROI: x 85%-93%, y 3.5%-6.3% (from countdown_monitor.rs)
+                // OPTIMIZATION: Copy Header Strip (Timer + Pause Button)
+                // Timer ROI: x 85%-93%
+                // Pause ROI: x 92%-100%
+                // Combined: x 85%-100%
                 let roi_x_start = (full_width as f32 * 0.85) as u32;
-                let roi_x_end = (full_width as f32 * 0.93) as u32;
+                let roi_x_end = full_width; // 100%
                 let roi_y_start = (full_height as f32 * 0.035) as u32;
                 let roi_y_end = (full_height as f32 * 0.063) as u32;
 
@@ -360,6 +430,18 @@ pub fn start_capture(
     app_handle: AppHandle,
     hwnd: usize,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let manager = app_handle.state::<InterceptorManager>();
+
+    // Check if already running
+    if manager.is_running.load(Ordering::SeqCst) {
+        println!("Capture already running. Ignoring new request.");
+        return Ok(());
+    }
+
+    // Set running flag
+    manager.is_running.store(true, Ordering::SeqCst);
+    manager.should_stop.store(false, Ordering::SeqCst);
+
     let window = Window::from_raw_hwnd(hwnd as *mut std::ffi::c_void);
     let settings = Settings::new(
         window,
@@ -370,9 +452,18 @@ pub fn start_capture(
         MinimumUpdateIntervalSettings::Custom(Duration::from_millis(16)),
         DirtyRegionSettings::Default,
         ColorFormat::Rgba8,
-        CaptureFlags { app_handle, hwnd },
+        CaptureFlags {
+            app_handle: app_handle.clone(),
+            hwnd,
+        },
     );
 
-    CaptureHandler::start(settings)
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+    // Run the capture (BLOCKING)
+    let result = CaptureHandler::start(settings);
+
+    // Reset running flag when finished
+    manager.is_running.store(false, Ordering::SeqCst);
+    println!("Capture session ended.");
+
+    result.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
 }
