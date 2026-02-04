@@ -3,7 +3,7 @@ pub mod commands;
 pub mod core;
 pub mod state;
 
-use crate::core::mjpeg::{start_server, MjpegState};
+use crate::state::DebugState;
 use std::sync::Arc;
 use tauri::Manager;
 
@@ -12,18 +12,19 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            let mjpeg_state = Arc::new(MjpegState::new());
-            // Start the MJPEG server on port 12345
-            start_server(mjpeg_state.clone(), 12345);
+            let debug_state = Arc::new(DebugState::new());
             // Manage the state so other threads (capture) can access it
-            app.manage(mjpeg_state);
+            app.manage(debug_state);
 
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::timeline::greet,
             commands::target::list_potential_targets,
-            commands::intercept::start_intercept_demo
+            commands::intercept::start_intercept_demo,
+            commands::intercept::start_intercept_demo,
+            commands::debug::trigger_screenshot,
+            commands::debug::save_binary_timer_image
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
