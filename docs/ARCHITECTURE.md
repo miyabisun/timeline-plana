@@ -43,6 +43,14 @@ We use a **Feature-Sliced** inspired approach for Frontend and a **Modular** app
 
 ## Core Systems
 
+### Tactical Guidance (Core Mission)
+
+The reason Plana exists. She reads a **YAML timeline file** (created by Timeline Arona) that defines when and which EX skills should be activated during a boss fight. Rules can trigger on **remaining time** or on **accumulated EX cost**.
+
+At runtime, Plana continuously compares the current game state (timer, cost, battle state) against the timeline rules, resolves the **next skill to activate and its target timing**, and pushes that guidance to the Sensei's screen via the Frontend UI. This is the loop that ties every other system together — screen capture feeds the sensors, sensors feed the resolver, and the resolver feeds the display.
+
+See [Tactical Guidance spec](./specs/tactical_guidance.md) for the full design.
+
 ### Screen Capture & Streaming
 
 We employ a high-performance, low-latency capture pipeline optimized for Blue Archive (60FPS game, 30FPS combat logic).
