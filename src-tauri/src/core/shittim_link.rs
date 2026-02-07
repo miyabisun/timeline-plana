@@ -45,7 +45,5 @@ pub fn sync_to_chest(
         timer,
     };
 
-    // Event name: "link-update" (or "shittim-sync"?)
-    // Let's use "link-sync" to match the module name concept.
     let _ = app_handle.emit("link-sync", &payload);
 }

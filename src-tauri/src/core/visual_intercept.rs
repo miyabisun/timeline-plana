@@ -125,10 +125,6 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                 let rgb_data = payload.rgb_data;
                 let width = payload.roi_width;
                 let height = payload.roi_height;
-                let _now = Instant::now();
-
-                // 0. Status Update (Integrated into Shittim Link below)
-                // frame_count += 1; // Unused
 
                 // 1. Check for Screenshot Request
                 {
@@ -291,7 +287,6 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
             let received_fps = self.fps_counter_received as f64 / elapsed;
             let accepted_fps = self.fps_counter_accepted as f64 / elapsed;
             let queue_full = self.fps_queue_full;
-            let queue_full = self.fps_queue_full;
             // let total_push = self.fps_counter_accepted;
 
             // Update shared stats instead of printing
@@ -395,8 +390,8 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
 
                     let payload = CapturePayload {
                         rgb_data,
-                        roi_width: roi_width,
-                        roi_height: roi_height,
+                        roi_width,
+                        roi_height,
                         window_width: full_width,
                         window_height: full_height,
                     };

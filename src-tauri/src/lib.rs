@@ -24,7 +24,6 @@ pub fn run() {
             commands::timeline::greet,
             commands::target::list_potential_targets,
             commands::intercept::start_intercept_demo,
-            commands::intercept::start_intercept_demo,
             commands::debug::trigger_screenshot,
             commands::debug::save_binary_timer_image
         ])

@@ -292,8 +292,7 @@ pub fn calculate_adaptive_threshold(rgb_data: &[u8], width: u32, height: u32) ->
         .copied()
         .unwrap_or(80);
 
-    // Clamp to reasonable range
-    threshold.max(40).min(200)
+    threshold.clamp(40, 200)
 }
 
 /// Binarize RGB image with adaptive threshold

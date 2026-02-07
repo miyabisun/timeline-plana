@@ -72,7 +72,6 @@ pub fn check_pause_presence_in_wide_roi(rgb_data: &[u8], width: u32, height: u32
     let roi_y_start = (height as f32 * 0.005) as u32;
     let roi_y_end = (height as f32 * 0.20) as u32; // Scan a bit deeper just in case
 
-    let mut blue_pixel_count = 0u32;
     let mut white_pixel_count = 0u32;
     let mut total_pixels = 0u32;
 
@@ -89,14 +88,8 @@ pub fn check_pause_presence_in_wide_roi(rgb_data: &[u8], width: u32, height: u32
 
             total_pixels += 1;
 
-            // Blue Archive pause button uses a dark blue
-            let is_bluish = b > 150 && b > r + 20 && b > g;
-            // White II bars
+            // White II bars of the pause button
             let is_white = r > 200 && g > 200 && b > 200;
-
-            if is_bluish {
-                // blue_pixel_count += 1; // Unused for now
-            }
             if is_white {
                 white_pixel_count += 1;
             }
@@ -123,76 +116,21 @@ fn check_pause_button_visible(rgb_data: &[u8], width: u32, height: u32) -> bool 
     white_ratio > 0.05
 }
 
-/// Debug version that returns the blue and white pixel ratios
-#[cfg(test)]
+/// Returns the blue and white pixel ratios in the top-right corner.
+/// Used for battle state detection and diagnostics.
 fn check_pause_button_debug(rgb_data: &[u8], width: u32, height: u32) -> (f32, f32) {
-    // ROI: scan a larger area in the top-right corner
-    // The pause button is a small blue rectangle with white II icon
-    // We scan from 92% to 100% horizontally, 0.5% to 5% vertically
+    // ROI: top-right corner where the pause button lives
+    // 92%-100% horizontally, 0.5%-5% vertically
     let roi_x_start = (width as f32 * 0.92) as u32;
     let roi_x_end = width;
     let roi_y_start = (height as f32 * 0.005) as u32;
     let roi_y_end = (height as f32 * 0.05) as u32;
 
-    // Strategy: The pause button has a distinctive blue background
-    // Count blue-ish pixels and white pixels in the region
     let mut blue_pixel_count = 0u32;
     let mut white_pixel_count = 0u32;
     let mut total_pixels = 0u32;
 
     // Sample every 2nd pixel to speed up
-    for y in (roi_y_start..roi_y_end).step_by(2) {
-        for x in (roi_x_start..roi_x_end).step_by(2) {
-            let idx = ((y * width + x) * 3) as usize;
-            if idx + 2 >= rgb_data.len() {
-                continue;
-            }
-
-            let r = rgb_data[idx] as i32;
-            let g = rgb_data[idx + 1] as i32;
-            let b = rgb_data[idx + 2] as i32;
-
-            total_pixels += 1;
-
-            // Check for blue-ish pixels (the button background)
-            // Blue Archive pause button uses a dark blue: roughly (50-100, 80-130, 150-220)
-            // Or a lighter blue-gray: roughly (70-150, 100-180, 180-255)
-            let is_bluish = b > 150 && b > r + 20 && b > g;
-
-            // Check for white/bright pixels (the II bars)
-            let is_white = r > 200 && g > 200 && b > 200;
-
-            if is_bluish {
-                blue_pixel_count += 1;
-            }
-            if is_white {
-                white_pixel_count += 1;
-            }
-        }
-    }
-
-    if total_pixels == 0 {
-        return (0.0, 0.0);
-    }
-
-    let blue_ratio = blue_pixel_count as f32 / total_pixels as f32;
-    let white_ratio = white_pixel_count as f32 / total_pixels as f32;
-
-    (blue_ratio, white_ratio)
-}
-
-#[cfg(not(test))]
-fn check_pause_button_debug(rgb_data: &[u8], width: u32, height: u32) -> (f32, f32) {
-    // ROI: scan a larger area in the top-right corner
-    let roi_x_start = (width as f32 * 0.92) as u32;
-    let roi_x_end = width;
-    let roi_y_start = (height as f32 * 0.005) as u32;
-    let roi_y_end = (height as f32 * 0.05) as u32;
-
-    let mut blue_pixel_count = 0u32;
-    let mut white_pixel_count = 0u32;
-    let mut total_pixels = 0u32;
-
     for y in (roi_y_start..roi_y_end).step_by(2) {
         for x in (roi_x_start..roi_x_end).step_by(2) {
             let idx = ((y * width + x) * 3) as usize;
