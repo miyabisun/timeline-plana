@@ -1,38 +1,17 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import ConnectionPanel from "./components/layout/ConnectionPanel";
 import DebugPanel from "./components/layout/DebugPanel";
 import TimelinePanel from "./components/layout/TimelinePanel";
 import SettingsPanel from "./components/layout/SettingsPanel";
 import { Activity, Bug, Settings, LayoutDashboard } from "lucide-react";
 import { listen } from '@tauri-apps/api/event';
+import { WebviewWindow } from '@tauri-apps/api/webviewWindow';
+import { currentMonitor } from '@tauri-apps/api/window';
+import type { ProcessCandidate, ShittimPayload, Theme, TabId } from './types';
 import "./App.css";
 
-export interface ProcessCandidate {
-  pid: number;
-  name: string;
-  window_title: string;
-  hwnd: number;
-}
-
-export interface ShittimPayload {
-  battle_state: string;
-  fps: number;
-  stats?: {
-    received: number;
-    accepted: number;
-    queue_full: number;
-  };
-  timer: null | {
-    minutes: number;
-    seconds: number;
-    milliseconds: number;
-  };
-}
-
-export type Theme = 'auto' | 'light' | 'dark';
-
 function App() {
-  const [activeTab, setActiveTab] = useState("check");
+  const [activeTab, setActiveTab] = useState<TabId>("check");
   // Initialize from localStorage or default to 'auto'
   const [theme, setTheme] = useState<Theme>(() => {
     return (localStorage.getItem('app-theme') as Theme) || 'auto';
@@ -84,6 +63,90 @@ function App() {
 
     return () => {
       unlistenPromise.then(unlisten => unlisten());
+    };
+  }, []);
+
+  // Overlay state (lives in App so it survives tab switches)
+  const [overlayActive, setOverlayActive] = useState(false);
+  const overlayActiveRef = useRef(false);
+  const shittimDataRef = useRef(shittimData);
+  useEffect(() => { overlayActiveRef.current = overlayActive; }, [overlayActive]);
+  useEffect(() => { shittimDataRef.current = shittimData; }, [shittimData]);
+
+  const destroyOverlay = useCallback(async () => {
+    try {
+      const existing = await WebviewWindow.getByLabel('overlay');
+      if (existing) await existing.destroy();
+    } catch { /* ignore */ }
+  }, []);
+
+  const createOverlay = useCallback(async () => {
+    const data = shittimDataRef.current;
+    if (!data) return;
+    const monitor = await currentMonitor();
+    const scale = monitor?.scaleFactor ?? 1;
+    const win = data.window;
+    // Backend sends physical pixels (Win32 API); Tauri positions in logical pixels
+    const logicalX = win.x / scale;
+    const logicalY = win.y / scale;
+    const logicalW = win.width / scale;
+    const logicalH = win.height / scale;
+    const overlayWidth = 140; // Windows enforces minimum window width ~125px
+    const overlayHeight = 120;
+    const x = Math.round(logicalX + logicalW - overlayWidth);
+    const y = Math.round(logicalY + logicalH / 2 - overlayHeight / 2);
+
+    const resolvedTheme = theme === 'auto'
+      ? (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+      : theme;
+
+    const webview = new WebviewWindow('overlay', {
+      url: `/overlay.html?theme=${resolvedTheme}`,
+      width: overlayWidth,
+      height: overlayHeight,
+      x,
+      y,
+      decorations: false,
+      transparent: true,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      focus: false,
+      resizable: false,
+      shadow: false,
+    });
+
+    webview.once('tauri://created', () => {
+      webview.setIgnoreCursorEvents(true);
+    });
+  }, [theme]);
+
+  const toggleOverlay = useCallback(async () => {
+    if (overlayActive) {
+      await destroyOverlay();
+      setOverlayActive(false);
+    } else {
+      if (!shittimData) return;
+      await createOverlay();
+      setOverlayActive(true);
+    }
+  }, [overlayActive, shittimData, createOverlay, destroyOverlay]);
+
+  // Recreate overlay when theme changes
+  useEffect(() => {
+    if (!overlayActiveRef.current) return;
+    (async () => {
+      await destroyOverlay();
+      await new Promise(r => setTimeout(r, 50));
+      await createOverlay();
+    })();
+  }, [createOverlay]); // createOverlay changes when theme changes
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      WebviewWindow.getByLabel('overlay')
+        .then(w => w?.destroy())
+        .catch(() => {});
     };
   }, []);
 
@@ -159,6 +222,8 @@ function App() {
             <DebugPanel
               shittimData={shittimData}
               targetInfo={targetInfo}
+              overlayActive={overlayActive}
+              onToggleOverlay={toggleOverlay}
             />
           </div>
         )}

@@ -1,6 +1,5 @@
 import { Settings, Laptop, Sun, Moon } from "lucide-react";
-
-type Theme = 'auto' | 'light' | 'dark';
+import type { Theme } from '../../types';
 
 interface SettingsPanelProps {
   theme: Theme;

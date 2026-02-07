@@ -4,7 +4,7 @@ use crate::state::DebugState;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, GetWindowRect};
@@ -51,8 +51,11 @@ struct CapturePayload {
     rgb_data: Vec<u8>,
     roi_width: u32,
     roi_height: u32,
-    window_width: u32,
-    window_height: u32,
+    /// Client area screen position and size
+    client_x: i32,
+    client_y: i32,
+    client_width: u32,
+    client_height: u32,
 }
 
 // Status payload sent to Frontend
@@ -125,6 +128,10 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                 let rgb_data = payload.rgb_data;
                 let width = payload.roi_width;
                 let height = payload.roi_height;
+                let client_x = payload.client_x;
+                let client_y = payload.client_y;
+                let client_width = payload.client_width;
+                let client_height = payload.client_height;
 
                 // 1. Check for Screenshot Request
                 {
@@ -243,7 +250,7 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                 // 5. Shittim Link Sync (30FPS)
                 // Read latest stats from producer
                 let current_stats = {
-                    let mut guard = consumer_stats.lock().unwrap();
+                    let guard = consumer_stats.lock().unwrap();
                     guard.clone()
                 };
 
@@ -253,6 +260,12 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                     current_timer,
                     30.0, // Stable FPS goal
                     current_stats,
+                    crate::core::shittim_link::WindowGeometry {
+                        x: client_x,
+                        y: client_y,
+                        width: client_width,
+                        height: client_height,
+                    },
                 );
                 // 5. MJPEG Streaming - REMOVED
             }
@@ -392,8 +405,10 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                         rgb_data,
                         roi_width,
                         roi_height,
-                        window_width: full_width,
-                        window_height: full_height,
+                        client_x: client_point.x,
+                        client_y: client_point.y,
+                        client_width: full_width,
+                        client_height: full_height,
                     };
 
                     // Conflating Push: Overwrite any pending frame with the latest one

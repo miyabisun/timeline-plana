@@ -1,14 +1,14 @@
-import { Activity, Bug, Monitor } from 'lucide-react';
-import { ShittimPayload, ProcessCandidate } from '../../App';
+import { Activity, Bug, Layers, Monitor } from 'lucide-react';
+import type { ShittimPayload, ProcessCandidate } from '../../types';
 
 interface DebugPanelProps {
   shittimData: ShittimPayload | null;
   targetInfo: ProcessCandidate | null;
+  overlayActive: boolean;
+  onToggleOverlay: () => void;
 }
 
-export default function DebugPanel({ shittimData, targetInfo }: DebugPanelProps) {
-  // Listener is now in App.tsx
-
+export default function DebugPanel({ shittimData, targetInfo, overlayActive, onToggleOverlay }: DebugPanelProps) {
   return (
     <div className="p-6 bg-slate-50 dark:bg-slate-900 min-h-full rounded-lg text-slate-800 dark:text-slate-100 transition-colors duration-300">
       <div className="mb-6 flex items-center gap-3">
@@ -22,15 +22,13 @@ export default function DebugPanel({ shittimData, targetInfo }: DebugPanelProps)
       </div>
 
       <div className="grid grid-cols-1 gap-4">
-        {/* Window Info Card (Moved from Connection) */}
-
-        {/* Window Info Card (Moved from Connection) */}
+        {/* Window Info Card */}
         <div className="bg-white dark:bg-slate-800 p-4 rounded-lg shadow-sm border border-slate-200 dark:border-slate-700 transition-colors duration-300">
           <h3 className="text-sm font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-3 flex items-center gap-2">
             <Monitor className="w-4 h-4" />
             Window Information
           </h3>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <div className="flex justify-between md:block border-b md:border-b-0 border-slate-100 dark:border-slate-700/50 pb-2 md:pb-0">
               <span className="text-slate-600 dark:text-slate-400 block text-xs mb-1">Target</span>
               <span className="font-mono font-medium">{targetInfo?.name || "-"}</span>
@@ -40,9 +38,15 @@ export default function DebugPanel({ shittimData, targetInfo }: DebugPanelProps)
               <span className="font-mono text-slate-400 dark:text-slate-500">{targetInfo?.pid || "-"}</span>
             </div>
             <div className="flex justify-between md:block border-b md:border-b-0 border-slate-100 dark:border-slate-700/50 pb-2 md:pb-0">
-              <span className="text-slate-600 dark:text-slate-400 block text-xs mb-1">Resolution</span>
+              <span className="text-slate-600 dark:text-slate-400 block text-xs mb-1">Client Size</span>
               <span className="font-mono font-medium text-blue-600 dark:text-blue-400">
-                16:9 (Native)
+                {shittimData ? `${shittimData.window.width}x${shittimData.window.height}` : "-"}
+              </span>
+            </div>
+            <div className="flex justify-between md:block border-b md:border-b-0 border-slate-100 dark:border-slate-700/50 pb-2 md:pb-0">
+              <span className="text-slate-600 dark:text-slate-400 block text-xs mb-1">Position</span>
+              <span className="font-mono font-medium">
+                {shittimData ? `(${shittimData.window.x}, ${shittimData.window.y})` : "-"}
               </span>
             </div>
           </div>
@@ -82,14 +86,35 @@ export default function DebugPanel({ shittimData, targetInfo }: DebugPanelProps)
           </div>
         )}
 
-        {/* Placeholder for future debug tools */}
-        <div className="bg-white dark:bg-slate-800 p-4 rounded-lg shadow-sm border border-slate-200 dark:border-slate-700 transition-colors duration-300 opacity-50">
-          <h3 className="text-sm font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-3">
-            Future Tools
+        {/* Overlay Test */}
+        <div className="bg-white dark:bg-slate-800 p-4 rounded-lg shadow-sm border border-slate-200 dark:border-slate-700 transition-colors duration-300">
+          <h3 className="text-sm font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-3 flex items-center gap-2">
+            <Layers className="w-4 h-4" />
+            Overlay Test
           </h3>
-          <p className="text-sm text-slate-400 dark:text-slate-500 text-center py-4">
-            OCR Debugging / Binary View
-          </p>
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium">Test Overlay</p>
+              <p className="text-xs text-slate-400 dark:text-slate-500">
+                Show a card on the right edge of the game window
+              </p>
+            </div>
+            <button
+              onClick={onToggleOverlay}
+              disabled={!shittimData}
+              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                overlayActive
+                  ? 'bg-blue-600'
+                  : 'bg-slate-300 dark:bg-slate-600'
+              } ${!shittimData ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+            >
+              <span
+                className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${
+                  overlayActive ? 'translate-x-6' : 'translate-x-1'
+                }`}
+              />
+            </button>
+          </div>
         </div>
 
       </div>

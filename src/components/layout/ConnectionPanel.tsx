@@ -1,7 +1,7 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { CheckCircle2, Shield, Activity, Clock } from 'lucide-react';
-import { ProcessCandidate, ShittimPayload } from '../../App';
+import { ProcessCandidate, ShittimPayload } from '../../types';
 
 interface ConnectionPanelProps {
   shittimData: ShittimPayload | null;
@@ -9,36 +9,33 @@ interface ConnectionPanelProps {
   setTargetInfo: (info: ProcessCandidate | null) => void;
 }
 
-export default function ConnectionPanel({ shittimData, targetInfo, setTargetInfo }: ConnectionPanelProps) {
+export default function ConnectionPanel({ shittimData, setTargetInfo }: ConnectionPanelProps) {
   const [status, setStatus] = useState<string>("Searching for BlueArchive...");
   const [isConnected, setIsConnected] = useState(false);
-  // targetInfo and shittimData come from props now
-  const pollingRef = useRef<NodeJS.Timeout | null>(null);
+  const isConnectedRef = useRef(false);
+  const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  useEffect(() => {
-    startPolling();
-
-    return () => {
-      stopPolling();
-    };
-  }, []);
-
-  const startPolling = () => {
-    checkTarget();
-    if (!pollingRef.current) {
-      pollingRef.current = setInterval(checkTarget, 3000);
-    }
-  };
-
-  const stopPolling = () => {
+  const stopPolling = useCallback(() => {
     if (pollingRef.current) {
       clearInterval(pollingRef.current);
       pollingRef.current = null;
     }
-  };
+  }, []);
 
-  const checkTarget = async () => {
-    if (isConnected) return;
+  const startCapture = useCallback(async (hwnd: number) => {
+    try {
+      setStatus("Target Found. Connecting...");
+      await invoke('start_intercept_demo', { hwnd });
+      setStatus("Connected");
+      setIsConnected(true);
+      isConnectedRef.current = true;
+    } catch (e) {
+      setStatus(`Connection Error: ${e}`);
+    }
+  }, []);
+
+  const checkTarget = useCallback(async () => {
+    if (isConnectedRef.current) return;
 
     try {
       const procs = await invoke<ProcessCandidate[]>('list_potential_targets');
@@ -46,25 +43,24 @@ export default function ConnectionPanel({ shittimData, targetInfo, setTargetInfo
 
       if (target) {
         setTargetInfo(target);
-        startCapture(target.hwnd);
         stopPolling();
+        startCapture(target.hwnd);
       }
     } catch (e) {
       console.error("Failed to list targets:", e);
     }
-  };
+  }, [setTargetInfo, stopPolling, startCapture]);
 
-  const startCapture = async (hwnd: number) => {
-    try {
-      setStatus("Target Found. Connecting...");
-      await invoke('start_intercept_demo', { hwnd: hwnd });
-      setStatus("Connected");
-      setIsConnected(true);
-    } catch (e) {
-      setStatus(`Connection Error: ${e}`);
-      startPolling();
+  useEffect(() => {
+    checkTarget();
+    if (!pollingRef.current) {
+      pollingRef.current = setInterval(checkTarget, 3000);
     }
-  };
+
+    return () => {
+      stopPolling();
+    };
+  }, [checkTarget, stopPolling]);
 
   return (
     <div className="p-6 bg-slate-50 dark:bg-slate-900 min-h-full rounded-lg text-slate-800 dark:text-slate-100 transition-colors duration-300">
@@ -117,10 +113,6 @@ export default function ConnectionPanel({ shittimData, targetInfo, setTargetInfo
           </div>
         </div>
       </div>
-
-
-      {/* System Diagnostics (Debug Info) */}
-
-    </div >
+    </div>
   );
 }
