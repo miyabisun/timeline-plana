@@ -62,6 +62,8 @@ struct CapturePayload {
     client_height: u32,
     /// Average brightness of center frame region (for Paused/Slow detection)
     center_brightness: f32,
+    /// NCC match score for PAUSE dialog template (for Paused detection)
+    pause_match_score: f32,
 }
 
 // Status payload sent to Frontend
@@ -76,6 +78,8 @@ struct CaptureHandler {
     latest_frame: Arc<(Mutex<Option<CapturePayload>>, Condvar)>,
     // Shared Stats: Updated by Producer, Read by Consumer
     shared_stats: Arc<Mutex<Option<crate::core::shittim_link::CaptureStats>>>,
+    // Debug state for full screenshot (Producer needs direct access to full frame)
+    debug_state: Arc<DebugState>,
     hwnd: usize,
     // FPS Counter for debugging
     fps_counter_received: u64, // Total frames received from OS
@@ -99,6 +103,7 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
 
         let app_handle = ctx.flags.app_handle.clone();
         let debug_state = app_handle.state::<Arc<DebugState>>().inner().clone();
+        let producer_debug_state = debug_state.clone();
 
         // Conflating Queue mechanism
         let latest_frame = Arc::new((Mutex::new(Option::<CapturePayload>::None), Condvar::new()));
@@ -261,17 +266,20 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                 if is_pause_visible {
                     logic_state.last_active_time = Instant::now();
                     logic_state.current_battle_state = BattleState::Active;
-                } else {
-                    // Use center brightness to distinguish Paused vs Slow
-                    // Same logic as combat_intel::analyze_battle_state()
+                } else if logic_state.current_battle_state != BattleState::Inactive {
+                    // Paused/Slow transitions only allowed from Active/Paused/Slow.
+                    // Prevents home screen (bright but not battle) from triggering Paused.
                     let brightness = payload.center_brightness;
-                    if brightness > 150.0 {
+                    let pause_score = payload.pause_match_score;
+                    if pause_score > crate::core::combat_intel::PAUSE_NCC_THRESHOLD {
+                        // PAUSE dialog template matched → definitively Paused
+                        logic_state.last_active_time = Instant::now();
+                        logic_state.current_battle_state = BattleState::Paused;
+                    } else if brightness > 150.0 {
                         // Bright center = PAUSE menu visible
                         logic_state.last_active_time = Instant::now();
                         logic_state.current_battle_state = BattleState::Paused;
-                    } else if brightness < 100.0
-                        && logic_state.current_battle_state != BattleState::Inactive
-                    {
+                    } else if brightness < 100.0 {
                         // Dark overlay = skill confirmation / slow-motion
                         logic_state.last_active_time = Instant::now();
                         logic_state.current_battle_state = BattleState::Slow;
@@ -355,6 +363,7 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
             last_frame_time: Instant::now(),
             latest_frame,
             shared_stats,
+            debug_state: producer_debug_state,
             hwnd: ctx.flags.hwnd,
             fps_counter_received: 0,
             fps_counter_accepted: 0,
@@ -451,6 +460,31 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
             let full_height = buffer.height();
 
             if let Ok(packed_slice) = buffer.as_nopadding_buffer() {
+                // Full screenshot: saved in Producer since Consumer only gets ROI data
+                {
+                    let mut flag = self.debug_state.should_full_screenshot.lock().unwrap();
+                    if *flag {
+                        *flag = false;
+                        let debug_output_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                            .parent()
+                            .unwrap()
+                            .join("output");
+                        let _ = std::fs::create_dir_all(&debug_output_dir);
+                        let path = debug_output_dir.join("full_screenshot.png");
+                        // Convert BGRA to RGB
+                        let mut rgb = Vec::with_capacity((full_width * full_height * 3) as usize);
+                        for chunk in packed_slice.chunks_exact(4) {
+                            rgb.extend_from_slice(&chunk[0..3]);
+                        }
+                        if let Some(img) = image::ImageBuffer::<image::Rgb<u8>, Vec<u8>>::from_raw(
+                            full_width, full_height, rgb,
+                        ) {
+                            let _ = img.save(&path);
+                            println!("Full screenshot saved to {:?}", path);
+                        }
+                    }
+                }
+
                 // OPTIMIZATION: Copy Header Strip (Timer + Pause Button)
                 // Timer ROI: x 85%-93%
                 // Pause ROI: x 92%-100%
@@ -506,6 +540,9 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                     // Sample center brightness for Paused/Slow state detection
                     let center_brightness =
                         sample_center_brightness(packed_slice, full_width, full_height);
+                    // NCC template matching for PAUSE dialog detection (RGBA input)
+                    let pause_match_score =
+                        crate::core::combat_intel::detect_pause_text_rgba(packed_slice, full_width, full_height);
 
                     let payload = CapturePayload {
                         rgb_data,
@@ -519,6 +556,7 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                         client_width: full_width,
                         client_height: full_height,
                         center_brightness,
+                        pause_match_score,
                     };
 
                     // Conflating Push: Overwrite any pending frame with the latest one

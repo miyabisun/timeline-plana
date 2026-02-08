@@ -26,7 +26,8 @@ pub fn run() {
             commands::intercept::start_intercept_demo,
             commands::debug::trigger_screenshot,
             commands::debug::save_binary_timer_image,
-            commands::debug::save_cost_roi_image
+            commands::debug::save_cost_roi_image,
+            commands::debug::save_full_screenshot
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

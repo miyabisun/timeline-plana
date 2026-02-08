@@ -12,6 +12,7 @@ The application captures the "Blue Archive" game window and processes it for rea
   - **Header Strip**: 85-100% X, 3.5-6.3% Y (~20KB) — Timer + Pause button
   - **Cost Gauge**: 64-89% X, 91.0-93.2% Y (~20KB) — EX skill cost boxes
   - **Center Brightness**: 10x10 pixel sample from frame center (~0.3KB) — Paused/Slow detection
+  - **Pause Match Score**: NCC template match via `combat_intel::detect_pause_text_rgba()` — PAUSE dialog detection
 - **Frame Gating**: Enforces **30 FPS** rhythm by dropping excess frames (`delta < 32ms`).
 
 ### 2. Zero Latency Queue
@@ -24,16 +25,18 @@ The application captures the "Blue Archive" game window and processes it for rea
 ### 3. Dedicated Worker (Consumer Thread)
 
 #### Battle State Detection
-Uses header strip ROI + center brightness to classify state:
+Uses header strip ROI + pause match score (NCC) + center brightness to classify state:
 
-| State | Condition |
-|-------|-----------|
-| **Active** | Pause button white pixels > 5% |
-| **Paused** | center_brightness > 150 (white PAUSE menu) |
-| **Slow** | center_brightness < 100 (dark skill confirmation overlay) |
-| **Inactive** | No state detected for > 2 seconds |
+| Priority | State | Condition |
+|----------|-------|-----------|
+| 1 | **Active** | Pause button white pixels > 5% AND blue pixels < 10% |
+| 2 | **Paused** | pause_match_score > 0.6 (NCC template match for PAUSE dialog) |
+| 3 | **Paused** | center_brightness > 150 (white PAUSE menu, fallback) |
+| 4 | **Slow** | center_brightness < 100 (dark skill confirmation overlay) |
+| 5 | **Inactive** | No state detected for > 2 seconds |
 
 State transitions use hysteresis (2s timeout before switching to Inactive).
+Paused/Slow transitions only allowed from non-Inactive state (prevents home screen false positives).
 
 #### Processing (for all non-Inactive states)
 - **Timer OCR**: Sub-crops timer region from header strip, passes to `countdown_monitor::recognize_timer_from_roi`.
@@ -55,6 +58,7 @@ struct CapturePayload {
     client_width: u32,
     client_height: u32,
     center_brightness: f32,   // Center frame brightness (ITU-R BT.601)
+    pause_match_score: f32,   // NCC template match score for PAUSE dialog
 }
 ```
 

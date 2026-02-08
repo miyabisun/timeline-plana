@@ -19,3 +19,9 @@ pub fn save_cost_roi_image(state: State<Arc<DebugState>>) -> Result<String, Stri
     state.request_cost_roi_image();
     Ok("Cost ROI image requested".to_string())
 }
+
+#[command]
+pub fn save_full_screenshot(state: State<Arc<DebugState>>) -> Result<String, String> {
+    state.request_full_screenshot();
+    Ok("Full screenshot requested".to_string())
+}
