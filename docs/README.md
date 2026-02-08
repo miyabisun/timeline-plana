@@ -11,4 +11,5 @@ This directory contains technical details, architectural decisions, and specific
   - [Countdown Monitor](./specs/countdown_monitor.md) - Timer OCR and skew correction pipeline.
   - [Shittim Link](./specs/shittim_link.md) - Backend-to-Frontend communication protocol (30Hz).
   - [Target Acquisition](./specs/target_acquisition.md) - Game process discovery logic.
+  - [Resource Survey](./specs/resource_survey.md) - EX skill cost gauge reading from battle screen.
   - [Visual Intercept](./specs/visual_intercept.md) - High-performance screen capture and OCR pipeline.

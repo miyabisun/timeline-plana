@@ -1,4 +1,5 @@
 use crate::core::countdown_monitor::TimerValue;
+use crate::core::resource_survey::CostValue;
 use tauri::{AppHandle, Emitter};
 
 /// Capture performance statistics.
@@ -29,6 +30,7 @@ struct ShittimPayload {
     fps: f64,
     stats: Option<CaptureStats>,
     timer: Option<TimerValue>,
+    cost: Option<CostValue>,
     window: WindowGeometry,
 }
 
@@ -37,6 +39,7 @@ pub fn sync_to_chest(
     app_handle: &AppHandle,
     battle_state: &str,
     timer: Option<TimerValue>,
+    cost: Option<CostValue>,
     fps: f64,
     stats: Option<CaptureStats>,
     window: WindowGeometry,
@@ -46,6 +49,7 @@ pub fn sync_to_chest(
         fps,
         stats,
         timer,
+        cost,
         window,
     };
 

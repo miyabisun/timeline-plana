@@ -51,11 +51,17 @@ struct CapturePayload {
     rgb_data: Vec<u8>,
     roi_width: u32,
     roi_height: u32,
+    /// Cost gauge ROI (bottom area)
+    cost_rgb_data: Vec<u8>,
+    cost_roi_width: u32,
+    cost_roi_height: u32,
     /// Client area screen position and size
     client_x: i32,
     client_y: i32,
     client_width: u32,
     client_height: u32,
+    /// Average brightness of center frame region (for Paused/Slow detection)
+    center_brightness: f32,
 }
 
 // Status payload sent to Frontend
@@ -128,10 +134,19 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                 let rgb_data = payload.rgb_data;
                 let width = payload.roi_width;
                 let height = payload.roi_height;
+                let cost_rgb_data = payload.cost_rgb_data;
+                let cost_w = payload.cost_roi_width;
+                let cost_h = payload.cost_roi_height;
                 let client_x = payload.client_x;
                 let client_y = payload.client_y;
                 let client_width = payload.client_width;
                 let client_height = payload.client_height;
+
+                // Debug output directory: project root /output (not src-tauri/output)
+                let debug_output_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("output");
 
                 // 1. Check for Screenshot Request
                 {
@@ -139,9 +154,8 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                     if *should_screenshot {
                         *should_screenshot = false;
                         println!("Visual Intercept: Screenshot requested!");
-                        let output_dir = "output";
-                        let _ = std::fs::create_dir_all(output_dir);
-                        let path = format!("{}/debug_screenshot.png", output_dir);
+                        let _ = std::fs::create_dir_all(&debug_output_dir);
+                        let path = debug_output_dir.join("debug_screenshot.png");
                         if let Some(img_buffer) =
                             image::ImageBuffer::<image::Rgb<u8>, Vec<u8>>::from_raw(
                                 width,
@@ -150,7 +164,7 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                             )
                         {
                             let _ = img_buffer.save(&path);
-                            println!("Screenshot saved to {}", path);
+                            println!("Screenshot saved to {:?}", path);
                         }
                     }
                 }
@@ -167,24 +181,24 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                         let binary = crate::core::countdown_monitor::binarize_for_ocr(
                             &processed, proc_w, proc_h,
                         );
-                        let _ = std::fs::create_dir_all("output");
+                        let _ = std::fs::create_dir_all(&debug_output_dir);
 
                         let filename = if let Some(timer) =
                             crate::core::countdown_monitor::recognize_timer(
                                 &rgb_data, width, height,
                             ) {
-                            format!(
-                                "output/binary_{:02}-{:02}-{:03}.png",
+                            debug_output_dir.join(format!(
+                                "binary_{:02}-{:02}-{:03}.png",
                                 timer.minutes, timer.seconds, timer.milliseconds
-                            )
+                            ))
                         } else {
-                            format!(
-                                "output/binary_failed_{}.png",
+                            debug_output_dir.join(format!(
+                                "binary_failed_{}.png",
                                 std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap()
                                     .as_millis()
-                            )
+                            ))
                         };
 
                         let _ = image::save_buffer(
@@ -194,12 +208,50 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                             proc_h,
                             image::ColorType::L8,
                         );
-                        println!("Saved binary image to {}", filename);
+                        println!("Saved binary image to {:?}", filename);
                         *save_binary = false;
                     }
                 }
 
-                // 3. Battle State Analysis
+                // 3. Check for Cost ROI Debug Request
+                {
+                    let mut save_cost = debug_state.should_save_cost_roi.lock().unwrap();
+                    if *save_cost {
+                        *save_cost = false;
+                        if cost_w > 0 && cost_h > 0 {
+                            let _ = std::fs::create_dir_all(&debug_output_dir);
+                            let (corrected, corr_w, corr_h) =
+                                crate::core::resource_survey::apply_cost_skew(
+                                    &cost_rgb_data,
+                                    cost_w,
+                                    cost_h,
+                                    crate::core::resource_survey::COST_SKEW_FACTOR,
+                                );
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap();
+                            let secs = now.as_secs();
+                            let millis = now.subsec_millis();
+                            let h = (secs / 3600) % 24;
+                            let m = (secs / 60) % 60;
+                            let s = secs % 60;
+                            let filename = debug_output_dir.join(format!(
+                                "cost_roi_{:02}{:02}{:02}_{:03}.png",
+                                h, m, s, millis
+                            ));
+                            let _ = image::save_buffer(
+                                &filename,
+                                &corrected,
+                                corr_w,
+                                corr_h,
+                                image::ColorType::Rgb8,
+                            );
+                            println!("Saved cost ROI to {:?}", filename);
+                        }
+                    }
+                }
+
+                // 4. Battle State Analysis
                 // The ROI is now 85-100% of the screen.
                 // Right part contains the Pause Button.
                 let is_pause_visible = crate::core::combat_intel::check_pause_presence_in_wide_roi(
@@ -210,18 +262,32 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                     logic_state.last_active_time = Instant::now();
                     logic_state.current_battle_state = BattleState::Active;
                 } else {
-                    // Persistence: Only switch to Inactive if pause button missing for > 2.0s
-                    if logic_state.last_active_time.elapsed() > Duration::from_secs(2) {
+                    // Use center brightness to distinguish Paused vs Slow
+                    // Same logic as combat_intel::analyze_battle_state()
+                    let brightness = payload.center_brightness;
+                    if brightness > 150.0 {
+                        // Bright center = PAUSE menu visible
+                        logic_state.last_active_time = Instant::now();
+                        logic_state.current_battle_state = BattleState::Paused;
+                    } else if brightness < 100.0
+                        && logic_state.current_battle_state != BattleState::Inactive
+                    {
+                        // Dark overlay = skill confirmation / slow-motion
+                        logic_state.last_active_time = Instant::now();
+                        logic_state.current_battle_state = BattleState::Slow;
+                    } else if logic_state.last_active_time.elapsed() > Duration::from_secs(2) {
+                        // Persistence: Only switch to Inactive after 2s
                         logic_state.current_battle_state = BattleState::Inactive;
                     }
                     // Otherwise keep previous state (hysteresis)
                 }
 
-                // 4. Timer OCR & Shittim Sync
+                // 4. Timer OCR & Cost Gauge Reading
                 let mut current_timer: Option<crate::core::countdown_monitor::TimerValue> = None;
+                let mut current_cost: Option<crate::core::resource_survey::CostValue> = None;
 
-                if logic_state.current_battle_state == BattleState::Active {
-                    // ... (Timer Extraction Code) ...
+                if logic_state.current_battle_state != BattleState::Inactive {
+                    // Timer Extraction
                     // We must SUB-CROP the Timer part to pass to countdown_monitor
                     // Capture is 85-100% (Width = 15%)
                     // Timer is 85-93% (Width = 8%)
@@ -245,6 +311,16 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                     ) {
                         current_timer = Some(timer);
                     }
+
+                    // Cost Gauge Reading (max_cost = 10 default, future: from timeline)
+                    if cost_w > 0 && cost_h > 0 {
+                        current_cost = crate::core::resource_survey::read_cost_gauge(
+                            &cost_rgb_data,
+                            cost_w,
+                            cost_h,
+                            10,
+                        );
+                    }
                 }
 
                 // 5. Shittim Link Sync (30FPS)
@@ -258,6 +334,7 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                     &app_handle,
                     &format!("{:?}", logic_state.current_battle_state),
                     current_timer,
+                    current_cost,
                     30.0, // Stable FPS goal
                     current_stats,
                     crate::core::shittim_link::WindowGeometry {
@@ -386,6 +463,15 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                 let roi_width = roi_x_end.saturating_sub(roi_x_start);
                 let roi_height = roi_y_end.saturating_sub(roi_y_start);
 
+                // Cost Gauge ROI: x 64%-89%, y 91.0%-93.2%
+                let cost_x_start = (full_width as f32 * 0.64) as u32;
+                let cost_x_end = (full_width as f32 * 0.89) as u32;
+                let cost_y_start = (full_height as f32 * 0.910) as u32;
+                let cost_y_end = (full_height as f32 * 0.932) as u32;
+
+                let cost_roi_width = cost_x_end.saturating_sub(cost_x_start);
+                let cost_roi_height = cost_y_end.saturating_sub(cost_y_start);
+
                 if roi_width > 0 && roi_height > 0 {
                     let pixel_count = (roi_width * roi_height) as usize;
                     let mut rgb_data = Vec::with_capacity(pixel_count * 3);
@@ -401,14 +487,38 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                         }
                     }
 
+                    // Extract Cost Gauge ROI
+                    let mut cost_rgb_data = Vec::new();
+                    if cost_roi_width > 0 && cost_roi_height > 0 {
+                        let cost_pixel_count = (cost_roi_width * cost_roi_height) as usize;
+                        cost_rgb_data.reserve(cost_pixel_count * 3);
+                        for y in cost_y_start..cost_y_end {
+                            let row_start = (y * full_width + cost_x_start) as usize * 4;
+                            let row_end = (y * full_width + cost_x_end) as usize * 4;
+                            if row_end <= packed_slice.len() {
+                                for chunk in packed_slice[row_start..row_end].chunks_exact(4) {
+                                    cost_rgb_data.extend_from_slice(&chunk[0..3]);
+                                }
+                            }
+                        }
+                    }
+
+                    // Sample center brightness for Paused/Slow state detection
+                    let center_brightness =
+                        sample_center_brightness(packed_slice, full_width, full_height);
+
                     let payload = CapturePayload {
                         rgb_data,
                         roi_width,
                         roi_height,
+                        cost_rgb_data,
+                        cost_roi_width,
+                        cost_roi_height,
                         client_x: client_point.x,
                         client_y: client_point.y,
                         client_width: full_width,
                         client_height: full_height,
+                        center_brightness,
                     };
 
                     // Conflating Push: Overwrite any pending frame with the latest one
@@ -433,6 +543,38 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
     fn on_closed(&mut self) -> Result<(), Self::Error> {
         println!("Capture session closed");
         Ok(())
+    }
+}
+
+/// Sample average brightness from a 10x10 pixel region at the frame center.
+///
+/// Uses ITU-R BT.601 perceived brightness (0.299R + 0.587G + 0.114B).
+/// Input is RGBA8 packed pixel data (4 bytes per pixel).
+///
+/// Returns average brightness (0.0–255.0), or 0.0 if the frame is too small.
+pub fn sample_center_brightness(rgba_data: &[u8], width: u32, height: u32) -> f32 {
+    let cx = width / 2;
+    let cy = height / 2;
+    let mut br_sum = 0u64;
+    let mut br_count = 0u32;
+    for dy in 0..10u32 {
+        for dx in 0..10u32 {
+            let sx = cx.saturating_sub(5) + dx;
+            let sy = cy.saturating_sub(5) + dy;
+            let idx = ((sy * width + sx) * 4) as usize;
+            if idx + 2 < rgba_data.len() {
+                br_sum += (299 * rgba_data[idx] as u64
+                    + 587 * rgba_data[idx + 1] as u64
+                    + 114 * rgba_data[idx + 2] as u64)
+                    / 1000;
+                br_count += 1;
+            }
+        }
+    }
+    if br_count > 0 {
+        br_sum as f32 / br_count as f32
+    } else {
+        0.0
     }
 }
 
@@ -476,4 +618,58 @@ pub fn start_capture(
     println!("Capture session ended.");
 
     result.map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Create an RGBA8 buffer filled with a single color
+    fn make_rgba_frame(width: u32, height: u32, r: u8, g: u8, b: u8) -> Vec<u8> {
+        let pixel_count = (width * height) as usize;
+        let mut data = Vec::with_capacity(pixel_count * 4);
+        for _ in 0..pixel_count {
+            data.extend_from_slice(&[r, g, b, 255]);
+        }
+        data
+    }
+
+    #[test]
+    fn test_sample_center_brightness_white() {
+        // Pure white (255,255,255) → brightness = 255
+        let data = make_rgba_frame(100, 100, 255, 255, 255);
+        let brightness = sample_center_brightness(&data, 100, 100);
+        assert!((brightness - 255.0).abs() < 1.0, "Expected ~255, got {}", brightness);
+    }
+
+    #[test]
+    fn test_sample_center_brightness_black() {
+        // Pure black (0,0,0) → brightness = 0
+        let data = make_rgba_frame(100, 100, 0, 0, 0);
+        let brightness = sample_center_brightness(&data, 100, 100);
+        assert!((brightness - 0.0).abs() < 0.01, "Expected ~0, got {}", brightness);
+    }
+
+    #[test]
+    fn test_sample_center_brightness_gray() {
+        // Mid gray (128,128,128) → brightness ≈ 128
+        let data = make_rgba_frame(100, 100, 128, 128, 128);
+        let brightness = sample_center_brightness(&data, 100, 100);
+        assert!((brightness - 128.0).abs() < 1.0, "Expected ~128, got {}", brightness);
+    }
+
+    #[test]
+    fn test_sample_center_brightness_empty() {
+        let brightness = sample_center_brightness(&[], 0, 0);
+        assert_eq!(brightness, 0.0);
+    }
+
+    #[test]
+    fn test_sample_center_brightness_small_frame() {
+        // 5x5 frame: center is at (2,2), sampling 10x10 but only some pixels exist
+        let data = make_rgba_frame(5, 5, 200, 200, 200);
+        let brightness = sample_center_brightness(&data, 5, 5);
+        // Should still return a value (partial sampling)
+        assert!(brightness > 100.0, "Expected >100, got {}", brightness);
+    }
 }

@@ -29,6 +29,11 @@ export interface ShittimPayload {
     seconds: number;
     milliseconds: number;
   };
+  cost: null | {
+    current: number;
+    max_cost: number;
+    confidence: number;
+  };
   window: WindowGeometry;
 }
 

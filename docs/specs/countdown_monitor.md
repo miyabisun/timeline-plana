@@ -6,7 +6,7 @@ Extracts and processes the battle countdown timer from screen captures. In Blue 
 ## Processing Pipeline
 
 ```
-Full Frame → ROI Extraction → Skew Correction → Template Matching → Validation
+Full Frame → ROI Extraction → Skew Correction → Binarization → Template Matching → Validation
 ```
 
 ## ROI Coordinates (Optimized for 30fps OCR)
@@ -62,13 +62,13 @@ x' = x + 0.25 × y
 
 **認識対象**: 実質6桁（分1桁目は固定、ms下2桁は3パターン）
 
-### Validation Rules (Strict)
-1. **Minutes**: Must be < 10 (Tens place = 0).
-2. **Seconds**: Must be 0-59. (Tens place <= 5).
-3. **Milliseconds**: Must end in 00, 33, or 67.
-   - Snap values: `0-16` -> `00`, `17-49` -> `33`, `50-83` -> `67`, `84-99` -> `00` (next cycle)
-
-**認識対象**: 実質6桁（分1桁目は固定、ms下2桁は3パターン）
+### Validation Rules
+1. **Minutes**: Must be single digit (0-9). Reject if >= 10.
+2. **Seconds**: Must be 0-59. Reject if >= 60.
+3. **Milliseconds**: Snap to nearest valid pattern, **not reject**.
+   - Snap: `0-16` → `00`, `17-49` → `33`, `50-83` → `67`, `84-99` → `00` (next hundred)
+   - 設計意図: OCR誤認識を吸収するため、不正なms値はrejectせず最寄りの有効パターンに丸める。
+     `snap_ms_to_valid()` の出力は常に X00/X33/X67 パターンを満たすため、snap後の追加検証は不要。
 
 ### 30fps制約によるmsパターン
 
@@ -149,6 +149,13 @@ x' = x + 0.25 × y
 |----------|-------------|
 | `extract_timer_roi()` | Crops timer region from full frame |
 | `apply_skew_correction()` | Applies affine shear transform |
-| `process_timer_region()` | Combined pipeline |
-| `recognize_digits()` | Template matching OCR (future) |
-| `validate_time()` | Time validation with rules (future) |
+| `process_timer_region()` | Combined ROI extraction + skew correction |
+| `binarize_for_ocr()` | Auto-calibrated binarization for OCR |
+| `find_character_columns()` | Character segmentation by column density |
+| `recognize_digit()` | Template matching for single digit |
+| `is_separator()` | Detect colon/period separators |
+| `parse_timer_digits()` | Parse digit array into (min, sec, ms) with validation |
+| `snap_ms_to_valid()` | Snap ms to nearest valid pattern (X00/X33/X67) |
+| `recognize_timer()` | Full OCR pipeline from raw frame |
+| `recognize_timer_from_roi()` | OCR pipeline from pre-cropped ROI |
+| `recognize_timer_from_binary()` | OCR pipeline from binarized image |

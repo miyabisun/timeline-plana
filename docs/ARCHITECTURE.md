@@ -17,7 +17,12 @@ We use a **Feature-Sliced** inspired approach for Frontend and a **Modular** app
 
 - **`commands/`**: The interface layer. Functions exposed to the Frontend via Tauri's invoke system. **No heavy logic here.**
 - **`core/`**: Pure Rust business logic. Independent of Tauri where possible.
-  - `visual_intercept.rs`: Screen capture logic using Windows Graphics Capture API.
+  - `visual_intercept.rs`: Screen capture and processing pipeline (Producer-Consumer).
+  - `combat_intel.rs`: Battle state detection (Active/Paused/Slow/Inactive).
+  - `countdown_monitor.rs`: Timer OCR with template matching.
+  - `resource_survey.rs`: EX skill cost gauge reading.
+  - `shittim_link.rs`: Backend-to-Frontend data transmission.
+  - `target_acquisition.rs`: Game process discovery.
 - **`state/`**: Application state definitions (Mutex, Arc, etc.).
 
 ## Design Principles

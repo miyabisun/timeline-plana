@@ -289,6 +289,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Diagnostic only: prints pixel values, no assertions
     fn test_diagnostic_all_images() {
         // Diagnostic test: print all values to calibrate thresholds
         println!("\n=== DIAGNOSTIC OUTPUT ===\n");

@@ -13,3 +13,9 @@ pub fn save_binary_timer_image(state: State<Arc<DebugState>>) -> Result<String, 
     state.request_binary_image();
     Ok("Binary timer image requested".to_string())
 }
+
+#[command]
+pub fn save_cost_roi_image(state: State<Arc<DebugState>>) -> Result<String, String> {
+    state.request_cost_roi_image();
+    Ok("Cost ROI image requested".to_string())
+}

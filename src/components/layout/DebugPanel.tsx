@@ -1,4 +1,5 @@
-import { Activity, Bug, Layers, Monitor } from 'lucide-react';
+import { Activity, Bug, Camera, Layers, Monitor } from 'lucide-react';
+import { invoke } from '@tauri-apps/api/core';
 import type { ShittimPayload, ProcessCandidate } from '../../types';
 
 interface DebugPanelProps {
@@ -85,6 +86,33 @@ export default function DebugPanel({ shittimData, targetInfo, overlayActive, onT
             </div>
           </div>
         )}
+
+        {/* Capture Tools */}
+        <div className="bg-white dark:bg-slate-800 p-4 rounded-lg shadow-sm border border-slate-200 dark:border-slate-700 transition-colors duration-300">
+          <h3 className="text-sm font-semibold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-3 flex items-center gap-2">
+            <Camera className="w-4 h-4" />
+            Capture Tools
+          </h3>
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium">Save Cost ROI</p>
+              <p className="text-xs text-slate-400 dark:text-slate-500">
+                Save skew-corrected cost gauge image to output/
+              </p>
+            </div>
+            <button
+              onClick={() => invoke('save_cost_roi_image')}
+              disabled={!shittimData}
+              className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                shittimData
+                  ? 'bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white cursor-pointer'
+                  : 'bg-slate-300 dark:bg-slate-600 text-slate-500 cursor-not-allowed'
+              }`}
+            >
+              Capture
+            </button>
+          </div>
+        </div>
 
         {/* Overlay Test */}
         <div className="bg-white dark:bg-slate-800 p-4 rounded-lg shadow-sm border border-slate-200 dark:border-slate-700 transition-colors duration-300">

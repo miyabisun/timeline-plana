@@ -2,12 +2,14 @@
 //!
 //! Monitors and extracts the battle countdown timer from screen captures.
 //! In Blue Archive, defeating the boss before time runs out is crucial.
-//! Handles italic text by applying skew correction (0.45).
+//! Handles italic text by applying skew correction (0.25).
 //!
 //! # Processing Pipeline
 //! 1. Extract timer ROI from full frame
 //! 2. Apply skew correction to straighten italic text
-//! 3. (Future: OCR digit recognition)
+//! 3. Binarize with adaptive threshold
+//! 4. Template matching OCR for digit recognition
+//! 5. Parse and validate timer value
 //!
 
 use image::{imageops::FilterType, GrayImage, Luma};
@@ -534,135 +536,86 @@ pub fn recognize_timer_from_roi(rgb_data: &[u8], width: u32, height: u32) -> Opt
     recognize_timer_from_binary(&binary, skew_w, skew_h)
 }
 
-/// Core OCR logic from binary data
-pub fn recognize_timer_from_binary(binary: &[u8], width: u32, height: u32) -> Option<TimerValue> {
-    // Step 3: Find character segments
-    let segments = find_character_columns(binary, width, height);
-
-    // Step 4: Recognize each segment
-    let mut digits: Vec<u8> = Vec::new();
-    let mut confidences: Vec<f32> = Vec::new();
-
-    for (start, end) in &segments {
-        // Recognize each segment
-        let (digit, conf) = recognize_digit(binary, width, height, *start, *end);
-
-        // Separators often look like '1' or '4' or have very low confidence
-        // We will filter them during parsing based on position from right
-        digits.push(digit);
-        confidences.push(conf);
-    }
-
-    // Step 5: Robust Parsing (Right-to-Left)
-    // Expected format: [0][M]:[S][S].[m][m][m]
-
-    // Filter out separators (10=colon, 11=dot) and keep digits (0-9)
-    // We rely on positional logic mainly, but cleaning helps.
-
-    let mut clean_digits = Vec::new();
-    let mut clean_confs = Vec::new();
-
-    for (d, c) in digits.iter().zip(confidences.iter()) {
-        if *d < 10 {
-            clean_digits.push(*d);
-            clean_confs.push(*c);
-        }
-    }
-
+/// Parse timer digits (minutes, seconds, milliseconds) from a cleaned digit array.
+///
+/// Input: array of numeric digits (0-9) with separators already removed.
+/// Expected format after cleaning: `[0] M S S m m m` (5-9 digits).
+///
+/// Returns `Some((minutes, seconds, snapped_ms))` or `None` if parsing fails.
+fn parse_timer_digits(clean_digits: &[u8]) -> Option<(u8, u8, u16)> {
     if clean_digits.len() < 5 {
         return None;
     }
 
     let len = clean_digits.len();
 
-    // Parse Milliseconds (Last 3 digits)
-    // If we have 9 segments (03:41.933), last 3 are ms.
-    // index: 0 1 2 3 4 5 6 7 8
-    // value: 0 3 : 4 1 . 9 3 3
-
-    // We need to handle cases where separators are recognized as digits.
-    // Let's assume max digits is 7 (0341933). If we have 9 segments, 2 are seps.
-    // If we have 7 segments, 0 are seps.
-
-    // Flexible parsing:
-    // Take last 3 as ms
-    let m100_idx = len.checked_sub(3)?;
-    let m10_idx = len.checked_sub(2)?;
-    let m1_idx = len.checked_sub(1)?;
-
-    let ms_val = (clean_digits[m100_idx] as u16 * 100)
-        + (clean_digits[m10_idx] as u16 * 10)
-        + (clean_digits[m1_idx] as u16);
-
+    // Milliseconds: last 3 digits
+    let ms_val = (clean_digits[len - 3] as u16 * 100)
+        + (clean_digits[len - 2] as u16 * 10)
+        + (clean_digits[len - 1] as u16);
     let snapped_ms = snap_ms_to_valid(ms_val);
 
-    // Parse Seconds (Preceding 2 digits)
-    // If len >= 6, we have at least 1 second digit.
-    // If len >= 7, we have 2 second digits.
-    // However, there might be a separator between Seconds and Milliseconds (index len-4)
+    // Seconds: 2 digits before ms (with separator skip for 8+ digits)
+    let (s1_idx, s10_idx) = if len >= 8 {
+        (len - 5, len - 6)
+    } else {
+        (len - 4, len - 5)
+    };
 
-    // Heuristic: If we have 9 segments, separator is at len-4 and len-7.
-    // Indices relative to end:
-    // -1: m
-    // -2: m
-    // -3: m
-    // -4: . (Separator) -> Skip if it looks like one, or strict pos
-    // -5: S
-    // -6: S
-    // -7: : (Separator)
-    // -8: M
-    // -9: 0
-
-    let mut s1_idx = len.checked_sub(4)?; // Ideally S1 or Sep
-    let mut s10_idx = len.checked_sub(5)?; // Ideally S10 or S1
-
-    // Check if s1_idx is likely a separator (period)
-    // If we have 8 or 9 segments, len-4 is likely '.'
-    // let mut seconds_val = 0; - REMOVED (unused assignment)
-
-    if len >= 8 {
-        // Skip separator at len-4
-        s1_idx = len.checked_sub(5)?;
-        s10_idx = len.checked_sub(6)?;
-    }
-
-    // Safety check indices
     if s10_idx >= clean_digits.len() {
         return None;
     }
 
     let seconds_val = clean_digits[s10_idx] * 10 + clean_digits[s1_idx];
-
-    // Strict Validation: Seconds must be < 60
     if seconds_val >= 60 {
-        // Error correction or rejection
-        // If > 60, maybe the tens digit is wrong.
-        // 71 -> 7 is wrong. Maybe it's 3? 4? 5?
-        // 81 -> 8 is wrong.
-        // For now, REJECT illegal values to avoid showing garbage
         return None;
     }
 
-    // Parse Minutes
-    let mut minutes_val = 0;
+    // Minutes: digit before seconds (with separator skip for 9+ digits)
+    let mut minutes_val = 0u8;
     if len >= 7 {
-        let mut m1_idx_calc = s10_idx.checked_sub(1);
-
-        // If len is 9, separator at len-7 leads to m1 at len-8
-        if len >= 9 {
-            m1_idx_calc = s10_idx.checked_sub(2);
-        }
-
-        if let Some(idx) = m1_idx_calc {
+        let m_idx = if len >= 9 {
+            s10_idx.checked_sub(2)
+        } else {
+            s10_idx.checked_sub(1)
+        };
+        if let Some(idx) = m_idx {
             if idx < clean_digits.len() {
                 minutes_val = clean_digits[idx];
             }
         }
     }
 
-    // Minutes tens place is always 0, ignore it.
+    // Minutes must be single digit (0-9)
+    if minutes_val >= 10 {
+        return None;
+    }
 
-    // Calculate overall confidence
+    // Note: ms validation is handled by snap_ms_to_valid() which always produces
+    // a valid X00/X33/X67 pattern. Explicit validate_ms_pattern() check is unnecessary.
+
+    Some((minutes_val, seconds_val, snapped_ms))
+}
+
+/// Core OCR logic from binary data
+pub fn recognize_timer_from_binary(binary: &[u8], width: u32, height: u32) -> Option<TimerValue> {
+    let segments = find_character_columns(binary, width, height);
+
+    let mut confidences: Vec<f32> = Vec::new();
+    let mut clean_digits = Vec::new();
+    let mut clean_confs = Vec::new();
+
+    for (start, end) in &segments {
+        let (digit, conf) = recognize_digit(binary, width, height, *start, *end);
+        confidences.push(conf);
+        if digit < 10 {
+            clean_digits.push(digit);
+            clean_confs.push(conf);
+        }
+    }
+
+    let (minutes_val, seconds_val, snapped_ms) = parse_timer_digits(&clean_digits)?;
+
     let avg_conf = if confidences.is_empty() {
         0.0
     } else {
@@ -671,7 +624,6 @@ pub fn recognize_timer_from_binary(binary: &[u8], width: u32, height: u32) -> Op
 
     let mut timer = TimerValue::new(minutes_val, seconds_val, snapped_ms, avg_conf);
 
-    // Copy per-digit confidence (mapping might be approximate due to skipping)
     for (i, &conf) in clean_confs.iter().take(7).enumerate() {
         timer.digit_confidence[i] = conf;
     }
@@ -696,62 +648,34 @@ mod tests {
 
     #[test]
     fn test_timer_roi_extraction() {
+        // battle-active.png is 3416x1993
         let (rgb_data, width, height) = load_test_image("battle-active.png");
+        assert_eq!((width, height), (3416, 1993), "Test image size changed");
 
         let roi = TimerROI::default();
         let (cropped, crop_w, crop_h) = extract_timer_roi(&rgb_data, width, height, &roi);
 
-        println!("Original: {}x{}", width, height);
-        println!("Cropped ROI: {}x{}", crop_w, crop_h);
-        println!("ROI pixel count: {}", cropped.len() / 3);
-
-        // Verify dimensions are reasonable
-        assert!(crop_w > 0, "Crop width should be positive");
-        assert!(crop_h > 0, "Crop height should be positive");
-        assert!(crop_w < width, "Crop width should be less than original");
-        assert!(crop_h < height, "Crop height should be less than original");
-
-        // For 3416x1993: expect ~164x40 pixels
-        // Width calculation must match extract_timer_roi:
-        // x_start = (3416 * 0.93) as u32 = 3176
-        // x_end = (3416 * 0.978) as u32 = 3340
-        // crop_width = 3340 - 3176 = 164
-        let x_start = (width as f32 * roi.x_start_pct) as u32;
-        let x_end = (width as f32 * roi.x_end_pct) as u32;
-        let y_start = (height as f32 * roi.y_start_pct) as u32;
-        let y_end = (height as f32 * roi.y_end_pct) as u32;
-        let expected_width = x_end - x_start;
-        let expected_height = y_end - y_start;
-        assert_eq!(crop_w, expected_width, "Width mismatch");
-        assert_eq!(crop_h, expected_height, "Height mismatch");
+        // Hardcoded expected values for 3416x1993 with ROI x=85-93%, y=3.5-6.3%
+        assert_eq!(crop_w, 273, "Expected ROI width 273");
+        assert_eq!(crop_h, 56, "Expected ROI height 56");
+        assert_eq!(cropped.len(), (273 * 56 * 3) as usize, "RGB data size mismatch");
     }
 
     #[test]
     fn test_skew_correction() {
         let (rgb_data, width, height) = load_test_image("battle-active.png");
 
-        // Extract ROI first
         let roi = TimerROI::default();
         let (cropped, crop_w, crop_h) = extract_timer_roi(&rgb_data, width, height, &roi);
+        // ROI is 273x56 (verified by test_timer_roi_extraction)
 
-        // Apply skew correction
         let (corrected, new_w, new_h) =
             apply_skew_correction(&cropped, crop_w, crop_h, SKEW_FACTOR);
 
-        println!("Before skew: {}x{}", crop_w, crop_h);
-        println!("After skew: {}x{}", new_w, new_h);
-
-        // Width should increase due to skew
-        let expected_shift = (SKEW_FACTOR * crop_h as f32).ceil() as u32;
-        assert_eq!(
-            new_w,
-            crop_w + expected_shift,
-            "Width should increase by shift amount"
-        );
-        assert_eq!(new_h, crop_h, "Height should remain the same");
-
-        // Verify output size matches expectations
-        assert_eq!(corrected.len(), (new_w * new_h * 3) as usize);
+        // SKEW_FACTOR=0.25, height=56 → max_shift=ceil(14.0)=14, new_width=273+14=287
+        assert_eq!(new_w, 287, "Expected skew-corrected width 287");
+        assert_eq!(new_h, 56, "Height should remain 56");
+        assert_eq!(corrected.len(), (287 * 56 * 3) as usize);
     }
 
     #[test]
@@ -770,59 +694,6 @@ mod tests {
             assert_eq!(processed.len(), (proc_w * proc_h * 3) as usize);
         }
     }
-
-    #[test]
-    fn test_save_debug_images() {
-        // This test saves processed images for visual verification
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let output_dir = format!("{}/output", manifest_dir);
-
-        // Create output directory if it doesn't exist
-        let _ = std::fs::create_dir_all(&output_dir);
-
-        let images = ["battle-active.png", "battle-pause.png", "battle-slow.png"];
-
-        for img_name in images {
-            let (rgb_data, width, height) = load_test_image(img_name);
-            let roi = TimerROI::default();
-
-            // Save ROI crop
-            let (cropped, crop_w, crop_h) = extract_timer_roi(&rgb_data, width, height, &roi);
-            let roi_path = format!("{}/roi_{}", output_dir, img_name);
-            image::save_buffer(&roi_path, &cropped, crop_w, crop_h, image::ColorType::Rgb8)
-                .unwrap_or_else(|e| println!("Failed to save {}: {}", roi_path, e));
-
-            // Save skew-corrected with current SKEW_FACTOR
-            let (corrected, new_w, new_h) =
-                apply_skew_correction(&cropped, crop_w, crop_h, SKEW_FACTOR);
-            let skew_path = format!("{}/skew_{}", output_dir, img_name);
-            image::save_buffer(&skew_path, &corrected, new_w, new_h, image::ColorType::Rgb8)
-                .unwrap_or_else(|e| println!("Failed to save {}: {}", skew_path, e));
-
-            println!(
-                "Saved {} -> roi: {}x{}, skew: {}x{}",
-                img_name, crop_w, crop_h, new_w, new_h
-            );
-        }
-
-        // Generate comparison with multiple skew factors for battle-active only
-        let (rgb_data, width, height) = load_test_image("battle-active.png");
-        let roi = TimerROI::default();
-        let (cropped, crop_w, crop_h) = extract_timer_roi(&rgb_data, width, height, &roi);
-
-        let test_factors = [0.16, 0.17, 0.18, 0.19, 0.20];
-        for factor in test_factors {
-            let (corrected, new_w, new_h) = apply_skew_correction(&cropped, crop_w, crop_h, factor);
-            let path = format!("{}/skew_{:.2}_battle-active.png", output_dir, factor);
-            image::save_buffer(&path, &corrected, new_w, new_h, image::ColorType::Rgb8)
-                .unwrap_or_else(|e| println!("Failed to save {}: {}", path, e));
-            println!("Saved skew factor {} -> {}", factor, path);
-        }
-    }
-
-    // ============================================================================
-    // OCR Tests
-    // ============================================================================
 
     #[test]
     fn test_ms_validation() {
@@ -926,38 +797,6 @@ mod tests {
     }
 
     #[test]
-    fn test_save_binarized_image() {
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let output_dir = format!("{}/output", manifest_dir);
-        let _ = std::fs::create_dir_all(&output_dir);
-
-        let images = ["battle-active.png", "battle-pause.png", "battle-slow.png"];
-
-        for img_name in images {
-            let (rgb_data, width, height) = load_test_image(img_name);
-            let (processed, proc_w, proc_h) = process_timer_region(&rgb_data, width, height);
-            let binary = binarize_for_ocr(&processed, proc_w, proc_h);
-
-            // Count white pixels
-            let white_count = binary.iter().filter(|&&p| p > 0).count();
-
-            // Find segments
-            let segments = find_character_columns(&binary, proc_w, proc_h);
-
-            // Save as grayscale image
-            let path = format!("{}/binary_{}", output_dir, img_name);
-            image::save_buffer(&path, &binary, proc_w, proc_h, image::ColorType::L8)
-                .unwrap_or_else(|e| println!("Failed to save {}: {}", path, e));
-            println!(
-                "{}: white={}, segments={}",
-                img_name,
-                white_count,
-                segments.len()
-            );
-        }
-    }
-
-    #[test]
     fn test_full_ocr_pipeline() {
         let test_cases = [
             ("battle-active.png", "03:41.933"),
@@ -967,177 +806,98 @@ mod tests {
 
         for (filename, expected) in test_cases {
             let (rgb_data, width, height) = load_test_image(filename);
-
-            // Debug intermediate steps
-            let (processed, proc_w, proc_h) = process_timer_region(&rgb_data, width, height);
-            let binary = binarize_for_ocr(&processed, proc_w, proc_h);
-            let segments = find_character_columns(&binary, proc_w, proc_h);
-
-            let mut digit_count = 0;
-            for (start, end) in &segments {
-                if !is_separator(&binary, proc_w, proc_h, *start, *end) {
-                    digit_count += 1;
-                }
-            }
-
-            println!("\n=== {} ===", filename);
-            println!("Segments: {}, Digits: {}", segments.len(), digit_count);
-
             let result = recognize_timer(&rgb_data, width, height);
-            println!("Expected: {}", expected);
 
-            if let Some(timer) = &result {
-                println!("Got:      {}", timer.to_string());
-            } else {
-                println!("Got: None (need >= 6 digits, got {})", digit_count);
-            }
+            assert!(result.is_some(), "{}: OCR returned None", filename);
 
-            assert!(
-                result.is_some(),
-                "{}: segments={}, digits={}",
-                filename,
-                segments.len(),
-                digit_count
+            let timer = result.unwrap();
+            assert_eq!(
+                timer.to_string(),
+                expected,
+                "{}: OCR result mismatch",
+                filename
             );
         }
     }
 
     #[test]
-    fn test_rename_debug_images() {
-        use std::path::PathBuf;
-
-        // Ensure stderr output is visible
-        eprintln!("DEBUG: Starting test_rename_debug_images");
-
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let output_dir = PathBuf::from(manifest_dir).join("output");
-
-        eprintln!("DEBUG: Output dir: {:?}", output_dir);
-
-        let paths = match std::fs::read_dir(&output_dir) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("DEBUG: Output directory not found or unreadable: {}", e);
-                return;
+    fn test_is_separator_narrow_with_gap() {
+        // Create a binary image with a narrow column that has a gap in the middle (colon-like)
+        let width = 20u32;
+        let height = 20u32;
+        let mut binary = vec![0u8; (width * height) as usize];
+        // Draw pixels at top and bottom of a narrow column (x=8..=10), skip middle
+        for y in 0..height {
+            if y < 5 || y > 14 {
+                // Top and bottom: draw pixels
+                for x in 8..=10 {
+                    binary[(y * width + x) as usize] = 255;
+                }
             }
-        };
+            // Middle rows (5-14): no pixels → gap
+        }
+        assert!(is_separator(&binary, width, height, 8, 10));
+    }
 
-        for path in paths {
-            let path = path.unwrap().path();
-            let filename = path.file_name().unwrap().to_str().unwrap().to_string();
-
-            if filename.starts_with("binary_") && filename.ends_with(".png") {
-                eprintln!("DEBUG: Processing: {}", filename);
-
-                let img = match image::open(&path) {
-                    Ok(i) => i.to_luma8(),
-                    Err(e) => {
-                        eprintln!("DEBUG: Failed to open {}: {}", filename, e);
-                        continue;
-                    }
-                };
-                let width = img.width();
-                let height = img.height();
-                let binary = img.into_vec();
-
-                let segments = find_character_columns(&binary, width, height);
-                let mut digits = Vec::new();
-
-                for (start, end) in &segments {
-                    let (digit, _) = recognize_digit(&binary, width, height, *start, *end);
-                    digits.push(digit);
-                }
-
-                let numeric_digits: Vec<u8> = digits.iter().filter(|&&d| d < 10).cloned().collect();
-
-                let mut minutes = 0;
-                let mut seconds = 0;
-                let mut milliseconds = 0;
-                let mut valid = false;
-
-                let len = numeric_digits.len();
-                if len >= 5 {
-                    let m1 = numeric_digits[len - 1] as u16;
-                    let m10 = numeric_digits[len - 2] as u16;
-                    let m100 = numeric_digits[len - 3] as u16;
-                    let raw_ms = m100 * 100 + m10 * 10 + m1;
-                    milliseconds = snap_ms_to_valid(raw_ms);
-
-                    let s1 = numeric_digits[len - 4];
-                    let s10 = numeric_digits[len - 5];
-                    seconds = s10 * 10 + s1;
-
-                    if len >= 6 {
-                        minutes = numeric_digits[len - 6];
-                    }
-                    valid = true;
-                } else {
-                    eprintln!("DEBUG: {} - Not enough digits: {}", filename, len);
-                }
-
-                let mut validation_error = false;
-                if seconds >= 60 {
-                    validation_error = true;
-                    eprintln!(
-                        "DEBUG: {} - Validation Error: Seconds {} >= 60",
-                        filename, seconds
-                    );
-                }
-
-                if minutes >= 10 {
-                    validation_error = true;
-                    eprintln!(
-                        "DEBUG: {} - Validation Error: Minutes {} >= 10",
-                        filename, minutes
-                    );
-                }
-
-                let new_name = if valid && !validation_error {
-                    format!(
-                        "binary_{:02}-{:02}-{:03}.png",
-                        minutes, seconds, milliseconds
-                    )
-                } else if valid {
-                    format!(
-                        "binary_failed_{:02}-{:02}-{:03}.png",
-                        minutes, seconds, milliseconds
-                    )
-                } else {
-                    let timestamp_part = if let Some(last_underscore) = filename.rfind('_') {
-                        if let Some(dot) = filename.rfind('.') {
-                            if last_underscore < dot {
-                                let suffix = &filename[last_underscore + 1..dot];
-                                if suffix.chars().all(|c| c.is_numeric() || c == '-') {
-                                    suffix.to_string()
-                                } else {
-                                    filename.replace("binary_", "").replace(".png", "")
-                                }
-                            } else {
-                                filename.clone()
-                            }
-                        } else {
-                            filename.clone()
-                        }
-                    } else {
-                        filename.clone()
-                    };
-
-                    let core_name = timestamp_part.replace("binary_", "").replace("failed_", "");
-                    format!("binary_failed_{}.png", core_name)
-                };
-
-                let new_path = output_dir.join(&new_name);
-
-                if path != new_path {
-                    eprintln!("DEBUG: Renaming {} -> {}", filename, new_name);
-                    if let Err(e) = std::fs::rename(&path, &new_path) {
-                        eprintln!("DEBUG: Rename failed: {}", e);
-                    }
-                } else {
-                    eprintln!("DEBUG: Name unchanged: {}", filename);
-                }
+    #[test]
+    fn test_is_separator_filled_column() {
+        // Narrow column fully filled → not a separator (no gap)
+        let width = 20u32;
+        let height = 20u32;
+        let mut binary = vec![0u8; (width * height) as usize];
+        for y in 0..height {
+            for x in 8..=10 {
+                binary[(y * width + x) as usize] = 255;
             }
         }
+        assert!(!is_separator(&binary, width, height, 8, 10));
+    }
+
+    #[test]
+    fn test_is_separator_too_wide() {
+        // Wide segment → not a separator regardless of content
+        let width = 40u32;
+        let height = 20u32;
+        let binary = vec![0u8; (width * height) as usize];
+        assert!(!is_separator(&binary, width, height, 0, 19));
+    }
+
+    #[test]
+    fn test_recognize_digit_too_narrow() {
+        // Segment width < 3 → returns (0, 0.0)
+        let binary = vec![0u8; 100];
+        let (digit, conf) = recognize_digit(&binary, 10, 10, 5, 6);
+        assert_eq!(digit, 0);
+        assert_eq!(conf, 0.0);
+    }
+
+    #[test]
+    fn test_calculate_adaptive_threshold_empty() {
+        // Empty data → fallback 80
+        let threshold = calculate_adaptive_threshold(&[], 0, 0);
+        assert_eq!(threshold, 80);
+    }
+
+    #[test]
+    fn test_calculate_adaptive_threshold_uniform_white() {
+        // All white pixels → threshold should be clamped high
+        let width = 20u32;
+        let height = 10u32;
+        let data = vec![255u8; (width * height * 3) as usize];
+        let threshold = calculate_adaptive_threshold(&data, width, height);
+        // With uniform 255 luminance, threshold ≈ 255 but clamped to 200
+        assert_eq!(threshold, 200);
+    }
+
+    #[test]
+    fn test_calculate_adaptive_threshold_real_image() {
+        // battle-active.png timer ROI: white text on dark background
+        // Expected threshold is high due to high contrast (empirically 200)
+        let (rgb_data, width, height) = load_test_image("battle-active.png");
+        let (processed, proc_w, proc_h) = process_timer_region(&rgb_data, width, height);
+        let threshold = calculate_adaptive_threshold(&processed, proc_w, proc_h);
+        assert!(threshold >= 150,
+            "High-contrast timer text should produce threshold >= 150, got {}", threshold);
     }
 
     fn analyze_digit_features(
@@ -1154,9 +914,9 @@ mod tests {
 
         let mut total_pixels = 0u32;
         let mut top_half = 0u32;
-        let mut bottom_half = 0u32;
+        let mut _bottom_half = 0u32;
         let mut left_half = 0u32;
-        let mut right_half = 0u32;
+        let mut _right_half = 0u32;
         let mut center_col = 0u32;
         let mid_y = height / 2;
         let mid_x = x_start + seg_width / 2;
@@ -1169,12 +929,12 @@ mod tests {
                     if y < mid_y {
                         top_half += 1;
                     } else {
-                        bottom_half += 1;
+                        _bottom_half += 1;
                     }
                     if x < mid_x {
                         left_half += 1;
                     } else {
-                        right_half += 1;
+                        _right_half += 1;
                     }
 
                     let seg_center = x_start + seg_width / 2;
@@ -1325,23 +1085,120 @@ mod tests {
 
         if !failures.is_empty() {
             eprintln!("\nFailures:");
-
-            // Dump to file for reliable reading
-            let dump_path = PathBuf::from(manifest_dir).join("failures.txt");
-            if let Ok(mut file) = std::fs::File::create(&dump_path) {
-                use std::io::Write;
-                for fail in &failures {
-                    let _ = writeln!(file, "{}", fail);
-                }
-            }
-
-            for fail in failures {
+            for fail in &failures {
                 eprintln!("  {}", fail);
             }
-            panic!("OCR accuracy test failed");
+            panic!("OCR accuracy test failed: {}/{} failed", failures.len(), total);
         }
     }
     #[test]
+    fn test_parse_timer_digits_7_digits() {
+        // 7 digits: [0, M, SS, mmm] → 0 3 4 1 9 3 3
+        // len=7, so s1_idx=3, s10_idx=2, minutes from idx 1
+        let result = parse_timer_digits(&[0, 3, 4, 1, 9, 3, 3]);
+        assert_eq!(result, Some((3, 41, 933)));
+    }
+
+    #[test]
+    fn test_parse_timer_digits_5_digits_minimum() {
+        // 5 digits: [SS, mmm] → 4 1 9 3 3
+        // len=5, so s1_idx=1, s10_idx=0, no minutes (len<7)
+        let result = parse_timer_digits(&[4, 1, 9, 3, 3]);
+        assert_eq!(result, Some((0, 41, 933)));
+    }
+
+    #[test]
+    fn test_parse_timer_digits_6_digits() {
+        // 6 digits: len<7, no minutes
+        // s1_idx=2, s10_idx=1
+        let result = parse_timer_digits(&[3, 4, 1, 9, 3, 3]);
+        assert_eq!(result, Some((0, 41, 933)));
+    }
+
+    #[test]
+    fn test_parse_timer_digits_8_digits_separator_skip() {
+        // 8 digits: separator skip kicks in (len>=8)
+        // s1_idx=3, s10_idx=2 (same formula but different branch)
+        // minutes: len>=7, len<9 so m_idx = s10_idx - 1 = 1
+        let result = parse_timer_digits(&[0, 3, 4, 1, 9, 3, 3, 0]);
+        // ms: last 3 = [3, 3, 0] = 330 → snap to 333
+        // seconds: s10_idx=2 → 4, s1_idx=3 → 1, seconds=41
+        // minutes: idx 1 → 3
+        assert_eq!(result, Some((3, 41, 333)));
+    }
+
+    #[test]
+    fn test_parse_timer_digits_too_few() {
+        assert_eq!(parse_timer_digits(&[1, 2, 3, 4]), None);
+        assert_eq!(parse_timer_digits(&[1, 2, 3]), None);
+        assert_eq!(parse_timer_digits(&[]), None);
+    }
+
+    #[test]
+    fn test_parse_timer_digits_seconds_overflow() {
+        // seconds >= 60 → None
+        // 5 digits: s10_idx=0, s1_idx=1
+        // seconds = digits[0]*10 + digits[1] = 6*10 + 1 = 61 → None
+        let result = parse_timer_digits(&[6, 1, 0, 0, 0]);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_parse_timer_digits_ms_snapping() {
+        // ms=934 should snap to 933
+        let result = parse_timer_digits(&[0, 3, 4, 1, 9, 3, 4]);
+        assert_eq!(result, Some((3, 41, 933)));
+
+        // ms=700 should stay 700
+        let result = parse_timer_digits(&[5, 4, 7, 0, 0]);
+        assert_eq!(result, Some((0, 54, 700)));
+
+        // ms=467 → already valid (X67 pattern), stays 467
+        let result = parse_timer_digits(&[0, 0, 4, 6, 7]);
+        assert_eq!(result, Some((0, 0, 467)));
+    }
+
+    #[test]
+    fn test_parse_timer_digits_boundary_minutes() {
+        // minutes=9: valid (single digit max)
+        // 7 digits: [0, M, SS, mmm] → idx layout: 0=leading, 1=minutes, 2-3=seconds, 4-6=ms
+        let result = parse_timer_digits(&[0, 9, 5, 9, 9, 3, 3]);
+        assert_eq!(result, Some((9, 59, 933)));
+
+        // minutes=10: invalid (two-digit minutes)
+        // Can't happen via recognize_digit (returns 0-9), but parse_timer_digits must reject it
+        let result = parse_timer_digits(&[0, 10, 5, 9, 9, 3, 3]);
+        assert_eq!(result, None, "Two-digit minutes should be rejected");
+    }
+
+    #[test]
+    fn test_parse_timer_digits_boundary_seconds() {
+        // seconds=59: valid
+        let result = parse_timer_digits(&[5, 9, 0, 0, 0]);
+        assert_eq!(result, Some((0, 59, 0)));
+
+        // seconds=60: invalid
+        let result = parse_timer_digits(&[6, 0, 0, 0, 0]);
+        assert_eq!(result, None, "seconds=60 should be rejected");
+    }
+
+    #[test]
+    fn test_parse_timer_digits_boundary_ms() {
+        // ms last two digits = 00: valid (X00 pattern)
+        let result = parse_timer_digits(&[3, 0, 1, 0, 0]);
+        assert_eq!(result, Some((0, 30, 100)));
+
+        // ms last two digits = 33: valid (X33 pattern)
+        let result = parse_timer_digits(&[3, 0, 1, 3, 3]);
+        assert_eq!(result, Some((0, 30, 133)));
+
+        // ms last two digits = 67: valid (X67 pattern)
+        let result = parse_timer_digits(&[3, 0, 1, 6, 7]);
+        assert_eq!(result, Some((0, 30, 167)));
+    }
+
+    #[test]
+    #[ignore] // Template generation tool, not a test — writes to src/core/templates/
     fn test_extract_templates() {
         use std::path::PathBuf;
 
