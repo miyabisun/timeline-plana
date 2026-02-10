@@ -31,7 +31,8 @@ windows = { version = "0.58", features = [
     "Win32_Security",
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Dxgi",
-    "Win32_Graphics_Gdi"
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm"
 ] }
 image = { version = "0.25.9", features = ["jpeg", "png"] }
 

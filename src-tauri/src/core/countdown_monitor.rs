@@ -6,13 +6,14 @@
 //!
 //! # Processing Pipeline
 //! 1. Extract timer ROI from full frame
-//! 2. Apply skew correction to straighten italic text
-//! 3. Binarize with adaptive threshold
-//! 4. Template matching OCR for digit recognition
-//! 5. Parse and validate timer value
+//! 2. Normalize ROI to reference resolution (273px wide)
+//! 3. Apply skew correction to straighten italic text
+//! 4. Binarize with adaptive threshold
+//! 5. Template matching OCR for digit recognition
+//! 6. Parse and validate timer value
 //!
 
-use image::{imageops::FilterType, GrayImage, Luma};
+use image::{imageops::FilterType, GrayImage, Luma, RgbImage};
 use std::sync::OnceLock;
 
 // Embed templates
@@ -61,12 +62,13 @@ impl Default for TimerROI {
     fn default() -> Self {
         // Optimized coordinates for 30fps OCR performance
         // Timer "03:41.933" digits only (no clock icon)
-        // Adjustments: top +20%, left +20%, right -4%
+        // Content-relative percentages (excluding window capture black bars)
+        // Target pixels at 3400x1921: x=2903..3176, y=69..125
         TimerROI {
-            x_start_pct: 0.85,  // Skip clock icon completely
-            x_end_pct: 0.93,    // -4% from right (avoid brown corner)
-            y_start_pct: 0.035, // Shifted down for vertical centering
-            y_end_pct: 0.063,   // End with buffer for window scaling
+            x_start_pct: 0.8539, // 2903/3400 — skip clock icon completely
+            x_end_pct: 0.9342,   // 3176/3400 — avoid brown corner
+            y_start_pct: 0.0360, // 69/1921 — shifted down for vertical centering
+            y_end_pct: 0.0651,   // 125/1921 — end with buffer for window scaling
         }
     }
 }
@@ -75,6 +77,10 @@ impl Default for TimerROI {
 /// Blue Archive timer uses italic font that requires this correction
 /// Tested: 0.16-0.20 (under), 0.25 (optimal based on colon alignment)
 pub const SKEW_FACTOR: f32 = 0.25;
+
+/// Reference ROI width for resolution normalization.
+/// Templates were created at ~3400px content width → timer ROI ≈ 273px wide.
+const REFERENCE_ROI_WIDTH: u32 = 273;
 
 /// Extract the timer region from a full frame
 ///
@@ -116,6 +122,41 @@ pub fn extract_timer_roi(
     }
 
     (cropped, crop_width, crop_height)
+}
+
+/// Normalize ROI to reference resolution for consistent OCR results.
+///
+/// Resizes the ROI to [`REFERENCE_ROI_WIDTH`] (maintaining aspect ratio) so that
+/// binarization thresholds, column-density segmentation, and template matching
+/// all operate at the same scale regardless of the game window size.
+///
+/// Skips resizing when the input width is within ±5% of the reference to avoid
+/// unnecessary interpolation on already-correct-sized images.
+///
+/// # Arguments
+/// * `rgb_data` - RGB8 pixel data of the cropped ROI
+/// * `width` - ROI width in pixels
+/// * `height` - ROI height in pixels
+///
+/// # Returns
+/// Tuple of (normalized RGB data, new width, new height)
+pub fn normalize_roi(rgb_data: &[u8], width: u32, height: u32) -> (Vec<u8>, u32, u32) {
+    // Skip if already within ±5% of reference width
+    let ratio = width as f32 / REFERENCE_ROI_WIDTH as f32;
+    if (0.95..=1.05).contains(&ratio) {
+        return (rgb_data.to_vec(), width, height);
+    }
+
+    let new_width = REFERENCE_ROI_WIDTH;
+    let new_height = ((height as f32) * (new_width as f32 / width as f32)).round() as u32;
+
+    // Build an RgbImage from raw data
+    let img = RgbImage::from_raw(width, height, rgb_data.to_vec())
+        .expect("normalize_roi: invalid RGB buffer size");
+
+    let resized = image::imageops::resize(&img, new_width, new_height, FilterType::Triangle);
+
+    (resized.into_raw(), new_width, new_height)
 }
 
 /// Apply skew correction to straighten italic text
@@ -186,8 +227,11 @@ pub fn process_timer_region(rgb_data: &[u8], width: u32, height: u32) -> (Vec<u8
     // Step 1: Extract timer ROI
     let (cropped, crop_w, crop_h) = extract_timer_roi(rgb_data, width, height, &roi);
 
-    // Step 2: Apply skew correction
-    apply_skew_correction(&cropped, crop_w, crop_h, SKEW_FACTOR)
+    // Step 2: Normalize to reference resolution
+    let (normalized, norm_w, norm_h) = normalize_roi(&cropped, crop_w, crop_h);
+
+    // Step 3: Apply skew correction
+    apply_skew_correction(&normalized, norm_w, norm_h, SKEW_FACTOR)
 }
 
 // ============================================================================
@@ -527,10 +571,13 @@ pub fn recognize_timer(rgb_data: &[u8], width: u32, height: u32) -> Option<Timer
 /// OCR pipeline for pre-cropped Timer ROI data (skips ROI extraction)
 /// Use this when the input is already the Timer ROI region
 pub fn recognize_timer_from_roi(rgb_data: &[u8], width: u32, height: u32) -> Option<TimerValue> {
-    // Step 1: Apply skew correction only (ROI already extracted)
-    let (skewed, skew_w, skew_h) = apply_skew_correction(rgb_data, width, height, SKEW_FACTOR);
+    // Step 1: Normalize to reference resolution
+    let (normalized, norm_w, norm_h) = normalize_roi(rgb_data, width, height);
 
-    // Step 2: Binarize
+    // Step 2: Apply skew correction only (ROI already extracted)
+    let (skewed, skew_w, skew_h) = apply_skew_correction(&normalized, norm_w, norm_h, SKEW_FACTOR);
+
+    // Step 3: Binarize
     let binary = binarize_for_ocr(&skewed, skew_w, skew_h);
 
     recognize_timer_from_binary(&binary, skew_w, skew_h)
@@ -637,28 +684,37 @@ mod tests {
 
     fn load_test_image(filename: &str) -> (Vec<u8>, u32, u32) {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let path = format!("{}/tests/fixtures/{}", manifest_dir, filename);
+        let path = format!("{}/tests/fixtures/screenshots/{}", manifest_dir, filename);
         let img = image::open(&path)
             .unwrap_or_else(|e| panic!("Failed to load test image {}: {}", path, e));
         let rgb_img = img.to_rgb8();
         let (width, height) = rgb_img.dimensions();
         let rgb_data = rgb_img.into_raw();
-        (rgb_data, width, height)
+
+        // Detect and crop black bars (content anchored at top-left)
+        let (cw, ch) = crate::core::visual_intercept::detect_content_bounds(&rgb_data, width, height, 3);
+        let mut cropped = Vec::with_capacity((cw * ch * 3) as usize);
+        for y in 0..ch {
+            let start = (y * width * 3) as usize;
+            let end = start + (cw * 3) as usize;
+            cropped.extend_from_slice(&rgb_data[start..end]);
+        }
+        (cropped, cw, ch)
     }
 
     #[test]
     fn test_timer_roi_extraction() {
-        // battle-active.png is 3416x1993
         let (rgb_data, width, height) = load_test_image("battle-active.png");
-        assert_eq!((width, height), (3416, 1993), "Test image size changed");
 
         let roi = TimerROI::default();
         let (cropped, crop_w, crop_h) = extract_timer_roi(&rgb_data, width, height, &roi);
 
-        // Hardcoded expected values for 3416x1993 with ROI x=85-93%, y=3.5-6.3%
-        assert_eq!(crop_w, 273, "Expected ROI width 273");
-        assert_eq!(crop_h, 56, "Expected ROI height 56");
-        assert_eq!(cropped.len(), (273 * 56 * 3) as usize, "RGB data size mismatch");
+        // Content-relative ROI: x=85.39%-93.42%, y=3.60%-6.51%
+        let expected_w = ((width as f32 * 0.9342) as u32) - ((width as f32 * 0.8539) as u32);
+        let expected_h = ((height as f32 * 0.0651) as u32) - ((height as f32 * 0.0360) as u32);
+        assert_eq!(crop_w, expected_w, "ROI width mismatch for {}x{}", width, height);
+        assert_eq!(crop_h, expected_h, "ROI height mismatch for {}x{}", width, height);
+        assert_eq!(cropped.len(), (crop_w * crop_h * 3) as usize, "RGB data size mismatch");
     }
 
     #[test]
@@ -667,15 +723,16 @@ mod tests {
 
         let roi = TimerROI::default();
         let (cropped, crop_w, crop_h) = extract_timer_roi(&rgb_data, width, height, &roi);
-        // ROI is 273x56 (verified by test_timer_roi_extraction)
 
         let (corrected, new_w, new_h) =
             apply_skew_correction(&cropped, crop_w, crop_h, SKEW_FACTOR);
 
-        // SKEW_FACTOR=0.25, height=56 → max_shift=ceil(14.0)=14, new_width=273+14=287
-        assert_eq!(new_w, 287, "Expected skew-corrected width 287");
-        assert_eq!(new_h, 56, "Height should remain 56");
-        assert_eq!(corrected.len(), (287 * 56 * 3) as usize);
+        // SKEW_FACTOR=0.25: max_shift = ceil(crop_h * 0.25)
+        let max_shift = (crop_h as f32 * SKEW_FACTOR).ceil() as u32;
+        let expected_w = crop_w + max_shift;
+        assert_eq!(new_w, expected_w, "Expected skew-corrected width {}", expected_w);
+        assert_eq!(new_h, crop_h, "Height should remain {}", crop_h);
+        assert_eq!(corrected.len(), (new_w * new_h * 3) as usize);
     }
 
     #[test]
@@ -799,9 +856,9 @@ mod tests {
     #[test]
     fn test_full_ocr_pipeline() {
         let test_cases = [
-            ("battle-active.png", "03:41.933"),
-            ("battle-pause.png", "03:33.400"),
-            ("battle-slow.png", "03:54.700"),
+            ("battle-active.png", "03:43.533"),
+            ("battle-pause.png", "03:45.667"),
+            ("battle-slow.png", "03:39.700"),
         ];
 
         for (filename, expected) in test_cases {
@@ -1341,5 +1398,30 @@ mod tests {
         }
 
         eprintln!("DEBUG: Templates extracted.");
+    }
+
+    #[test]
+    fn test_min_ocr_pipeline() {
+        // At minimum resolution (640x360), Timer OCR has limited success.
+        // Timer ROI is only ~50px wide, too small for reliable template matching.
+        let battle_images = [
+            "min-battle-active.png",
+            "min-battle-pause.png",
+            "min-battle-slow.png",
+        ];
+        let mut success = 0;
+        for filename in battle_images {
+            let (rgb_data, width, height) = load_test_image(filename);
+            let result = recognize_timer(&rgb_data, width, height);
+            if let Some(timer) = result {
+                println!("{} ({}x{}): {}", filename, width, height, timer.to_string());
+                assert!(timer.minutes <= 59 && timer.seconds <= 59 && timer.milliseconds <= 999,
+                    "{}: invalid timer values {:?}", filename, timer);
+                success += 1;
+            } else {
+                println!("{} ({}x{}): OCR returned None (expected at min resolution)", filename, width, height);
+            }
+        }
+        println!("Timer OCR at min resolution: {}/3 succeeded", success);
     }
 }

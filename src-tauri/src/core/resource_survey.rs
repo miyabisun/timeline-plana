@@ -334,22 +334,32 @@ mod tests {
 
     fn load_test_image(filename: &str) -> (Vec<u8>, u32, u32) {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let path = format!("{}/tests/fixtures/{}", manifest_dir, filename);
+        let path = format!("{}/tests/fixtures/screenshots/{}", manifest_dir, filename);
         let img = image::open(&path)
             .unwrap_or_else(|e| panic!("Failed to load test image {}: {}", path, e));
         let rgb_img = img.to_rgb8();
         let (width, height) = rgb_img.dimensions();
         let rgb_data = rgb_img.into_raw();
-        (rgb_data, width, height)
+
+        // Detect and crop black bars (content anchored at top-left)
+        let (cw, ch) = crate::core::visual_intercept::detect_content_bounds(&rgb_data, width, height, 3);
+        let mut cropped = Vec::with_capacity((cw * ch * 3) as usize);
+        for y in 0..ch {
+            let start = (y * width * 3) as usize;
+            let end = start + (cw * 3) as usize;
+            cropped.extend_from_slice(&rgb_data[start..end]);
+        }
+        (cropped, cw, ch)
     }
 
-    /// Extract the cost gauge ROI from a full-screen image.
-    /// ROI: x=64-89%, y=91.0-93.2%
+    /// Extract the cost gauge ROI from a full-screen image (content-relative).
+    /// Original pixels at 3416x1993: x=2186..3040, y=1813..1857
+    /// Content-relative at 3400x1921: x=64.29%..89.41%, y=94.38%..96.67%
     fn extract_cost_roi(rgb_data: &[u8], width: u32, height: u32) -> (Vec<u8>, u32, u32) {
-        let x_start = (width as f32 * 0.64) as u32;
-        let x_end = (width as f32 * 0.89) as u32;
-        let y_start = (height as f32 * 0.910) as u32;
-        let y_end = (height as f32 * 0.932) as u32;
+        let x_start = (width as f32 * 0.6429) as u32;
+        let x_end = (width as f32 * 0.8941) as u32;
+        let y_start = (height as f32 * 0.9438) as u32;
+        let y_end = (height as f32 * 0.9667) as u32;
 
         let roi_w = x_end - x_start;
         let roi_h = y_end - y_start;
@@ -409,8 +419,8 @@ mod tests {
         let cost = result.unwrap();
         assert_eq!(cost.max_cost, 10);
         assert!(
-            cost.current >= 8.0 && cost.current <= 9.5,
-            "Expected current cost 8.0-9.5 in pause, got {}",
+            cost.current >= 4.0 && cost.current <= 5.5,
+            "Expected current cost 4.0-5.5 in pause, got {}",
             cost.current
         );
     }
@@ -427,8 +437,8 @@ mod tests {
         let cost = result.unwrap();
         assert_eq!(cost.max_cost, 10);
         assert!(
-            cost.current >= 0.5 && cost.current <= 2.5,
-            "Expected current cost 0.5-2.5 in slow, got {}",
+            cost.current >= 6.0 && cost.current <= 7.5,
+            "Expected current cost 6.0-7.5 in slow, got {}",
             cost.current
         );
     }
@@ -821,6 +831,31 @@ mod tests {
 
             let result = read_cost_gauge(&roi_data, roi_w, roi_h, 10);
             println!("  Result: {:?}", result);
+        }
+    }
+
+    #[test]
+    fn test_min_read_cost_gauge() {
+        // At minimum resolution (640x360), cost ROI is ~161x9 pixels.
+        // The gauge should still produce results despite the small ROI.
+        let images = [
+            "min-battle-active.png",
+            "min-battle-pause.png",
+            "min-battle-slow.png",
+        ];
+        for filename in images {
+            let (rgb_data, width, height) = load_test_image(filename);
+            let (roi_data, roi_w, roi_h) = extract_cost_roi(&rgb_data, width, height);
+            println!("{} (content={}x{}, cost_roi={}x{})", filename, width, height, roi_w, roi_h);
+
+            let result = read_cost_gauge(&roi_data, roi_w, roi_h, 10);
+            assert!(result.is_some(),
+                "{}: cost gauge returned None (roi={}x{})", filename, roi_w, roi_h);
+            let cost = result.unwrap();
+            println!("  cost={:.1}/{} confidence={:.2}", cost.current, cost.max_cost, cost.confidence);
+            assert_eq!(cost.max_cost, 10);
+            assert!(cost.current >= 0.0 && cost.current <= 10.0,
+                "{}: cost out of range: {}", filename, cost.current);
         }
     }
 }

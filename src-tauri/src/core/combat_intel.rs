@@ -12,11 +12,11 @@ use std::sync::OnceLock;
 /// Calibrated via diagnostic test: battle-pause ≈ 0.9+, others ≈ 0.0-0.3
 pub const PAUSE_NCC_THRESHOLD: f32 = 0.6;
 
-/// PAUSE template ROI (percentage of full frame)
-const PAUSE_ROI_X_START: f32 = 0.38;
-const PAUSE_ROI_X_END: f32 = 0.62;
-const PAUSE_ROI_Y_START: f32 = 0.13;
-const PAUSE_ROI_Y_END: f32 = 0.19;
+/// PAUSE template ROI (content-relative percentage, excluding black bars)
+pub const PAUSE_ROI_X_START: f32 = 0.382;
+pub const PAUSE_ROI_X_END: f32 = 0.623;
+pub const PAUSE_ROI_Y_START: f32 = 0.135;
+pub const PAUSE_ROI_Y_END: f32 = 0.197;
 
 static PAUSE_TEMPLATE: OnceLock<GrayImage> = OnceLock::new();
 
@@ -126,21 +126,22 @@ pub fn detect_pause_text(rgb_data: &[u8], width: u32, height: u32) -> f32 {
     compute_ncc(template, &candidate)
 }
 
-/// Detect PAUSE dialog text using NCC template matching on RGBA data.
+/// Compute PAUSE NCC score from a pre-cropped RGBA ROI.
+///
+/// This is the consumer-side version: the producer extracts the PAUSE ROI region
+/// as a dense RGBA buffer, and this function handles grayscale conversion, resize,
+/// and NCC computation on the worker thread (avoiding blocking the capture callback).
 ///
 /// Returns NCC score (-1.0 to 1.0). Score > PAUSE_NCC_THRESHOLD indicates PAUSE is visible.
-pub fn detect_pause_text_rgba(rgba_data: &[u8], width: u32, height: u32) -> f32 {
+pub fn compute_pause_ncc_from_roi(roi_rgba: &[u8], roi_width: u32, roi_height: u32) -> f32 {
+    if roi_width == 0 || roi_height == 0 {
+        return 0.0;
+    }
     let template = get_pause_template();
     let target_size = (template.width(), template.height());
 
-    let roi = (
-        (width as f32 * PAUSE_ROI_X_START) as u32,
-        (height as f32 * PAUSE_ROI_Y_START) as u32,
-        (width as f32 * PAUSE_ROI_X_END) as u32,
-        (height as f32 * PAUSE_ROI_Y_END) as u32,
-    );
-
-    let candidate = extract_grayscale_scaled(rgba_data, width, 4, roi, target_size);
+    let roi = (0, 0, roi_width, roi_height);
+    let candidate = extract_grayscale_scaled(roi_rgba, roi_width, 4, roi, target_size);
     compute_ncc(template, &candidate)
 }
 
@@ -365,17 +366,26 @@ fn calculate_center_brightness(rgb_data: &[u8], width: u32, height: u32) -> f64 
 mod tests {
     use super::*;
 
-    /// Load a test image from the tests/fixtures directory and convert to RGB8 data.
+    /// Load a test image from the tests/fixtures directory, crop black bars, and convert to RGB8 data.
     fn load_test_image(filename: &str) -> (Vec<u8>, u32, u32) {
         // CARGO_MANIFEST_DIR points to src-tauri during cargo test
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let path = format!("{}/tests/fixtures/{}", manifest_dir, filename);
+        let path = format!("{}/tests/fixtures/screenshots/{}", manifest_dir, filename);
         let img = image::open(&path)
             .unwrap_or_else(|e| panic!("Failed to load test image {}: {}", path, e));
         let rgb_img = img.to_rgb8();
         let (width, height) = rgb_img.dimensions();
         let rgb_data = rgb_img.into_raw();
-        (rgb_data, width, height)
+
+        // Detect and crop black bars (content anchored at top-left)
+        let (cw, ch) = crate::core::visual_intercept::detect_content_bounds(&rgb_data, width, height, 3);
+        let mut cropped = Vec::with_capacity((cw * ch * 3) as usize);
+        for y in 0..ch {
+            let start = (y * width * 3) as usize;
+            let end = start + (cw * 3) as usize;
+            cropped.extend_from_slice(&rgb_data[start..end]);
+        }
+        (cropped, cw, ch)
     }
 
     #[test]
@@ -587,5 +597,45 @@ mod tests {
         )
         .expect("Failed to save pause template to output");
         println!("Saved visual copy to {:?}", output_path);
+    }
+
+    #[test]
+    fn test_min_battle_active() {
+        let (rgb_data, width, height) = load_test_image("min-battle-active.png");
+        let state = analyze_battle_state(&rgb_data, width, height);
+        assert_eq!(state, BattleState::Active,
+            "Expected Active for min-battle-active.png ({}x{}), got {:?}", width, height, state);
+    }
+
+    #[test]
+    fn test_min_battle_paused() {
+        let (rgb_data, width, height) = load_test_image("min-battle-pause.png");
+        let state = analyze_battle_state(&rgb_data, width, height);
+        assert_eq!(state, BattleState::Paused,
+            "Expected Paused for min-battle-pause.png ({}x{}), got {:?}", width, height, state);
+    }
+
+    #[test]
+    fn test_min_battle_slow() {
+        let (rgb_data, width, height) = load_test_image("min-battle-slow.png");
+        let state = analyze_battle_state(&rgb_data, width, height);
+        assert!(state == BattleState::Paused || state == BattleState::Slow,
+            "Expected Paused or Slow for min-battle-slow.png ({}x{}), got {:?}", width, height, state);
+    }
+
+    #[test]
+    fn test_min_home_inactive() {
+        let (rgb_data, width, height) = load_test_image("min-home.png");
+        let state = analyze_battle_state(&rgb_data, width, height);
+        assert_eq!(state, BattleState::Inactive,
+            "Expected Inactive for min-home.png ({}x{}), got {:?}", width, height, state);
+    }
+
+    #[test]
+    fn test_min_home_noui_inactive() {
+        let (rgb_data, width, height) = load_test_image("min-home-noui.png");
+        let state = analyze_battle_state(&rgb_data, width, height);
+        assert_eq!(state, BattleState::Inactive,
+            "Expected Inactive for min-home-noui.png ({}x{}), got {:?}", width, height, state);
     }
 }

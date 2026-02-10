@@ -6,8 +6,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 use windows::Win32::Foundation::{HWND, POINT, RECT};
+use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
 use windows::Win32::Graphics::Gdi::ClientToScreen;
-use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, GetWindowRect};
+use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 use windows_capture::{
     capture::{Context, GraphicsCaptureApiHandler},
     frame::Frame,
@@ -62,8 +63,10 @@ struct CapturePayload {
     client_height: u32,
     /// Average brightness of center frame region (for Paused/Slow detection)
     center_brightness: f32,
-    /// NCC match score for PAUSE dialog template (for Paused detection)
-    pause_match_score: f32,
+    /// PAUSE ROI (pre-cropped RGBA for consumer-side NCC matching)
+    pause_roi_rgba: Vec<u8>,
+    pause_roi_width: u32,
+    pause_roi_height: u32,
 }
 
 // Status payload sent to Frontend
@@ -86,6 +89,13 @@ struct CaptureHandler {
     fps_counter_accepted: u64, // Frames passed to worker (after throttle)
     fps_queue_full: u64,       // Times queue was full (worker busy)
     fps_last_log_time: Instant,
+    // Crop debug: log once on first accepted frame
+    first_crop_logged: bool,
+    // Reusable buffer for software crop (avoids per-frame allocation)
+    crop_buffer: Vec<u8>,
+    // Cached content bounds (recomputed every ~5s instead of every frame)
+    cached_content_bounds: Option<(u32, u32)>,
+    content_bounds_counter: u64,
 }
 
 // Struct to hold state inside the logic loop to persist between iterations
@@ -160,7 +170,18 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                         *should_screenshot = false;
                         println!("Visual Intercept: Screenshot requested!");
                         let _ = std::fs::create_dir_all(&debug_output_dir);
-                        let path = debug_output_dir.join("debug_screenshot.png");
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap();
+                        let secs = now.as_secs();
+                        let millis = now.subsec_millis();
+                        let h = (secs / 3600) % 24;
+                        let m = (secs / 60) % 60;
+                        let s = secs % 60;
+                        let path = debug_output_dir.join(format!(
+                            "debug_screenshot_{:02}{:02}{:02}_{:03}.png",
+                            h, m, s, millis
+                        ));
                         if let Some(img_buffer) =
                             image::ImageBuffer::<image::Rgb<u8>, Vec<u8>>::from_raw(
                                 width,
@@ -269,8 +290,14 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                 } else if logic_state.current_battle_state != BattleState::Inactive {
                     // Paused/Slow transitions only allowed from Active/Paused/Slow.
                     // Prevents home screen (bright but not battle) from triggering Paused.
+                    // NCC template matching (only when needed, skipped during Active)
+                    let pause_score =
+                        crate::core::combat_intel::compute_pause_ncc_from_roi(
+                            &payload.pause_roi_rgba,
+                            payload.pause_roi_width,
+                            payload.pause_roi_height,
+                        );
                     let brightness = payload.center_brightness;
-                    let pause_score = payload.pause_match_score;
                     if pause_score > crate::core::combat_intel::PAUSE_NCC_THRESHOLD {
                         // PAUSE dialog template matched → definitively Paused
                         logic_state.last_active_time = Instant::now();
@@ -331,7 +358,7 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                     }
                 }
 
-                // 5. Shittim Link Sync (30FPS)
+                // 5. Shittim Link Sync
                 // Read latest stats from producer
                 let current_stats = {
                     let guard = consumer_stats.lock().unwrap();
@@ -343,7 +370,7 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                     &format!("{:?}", logic_state.current_battle_state),
                     current_timer,
                     current_cost,
-                    30.0, // Stable FPS goal
+                    60.0, // Game window capture rate (WGC 60 FPS)
                     current_stats,
                     crate::core::shittim_link::WindowGeometry {
                         x: client_x,
@@ -369,6 +396,10 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
             fps_counter_accepted: 0,
             fps_queue_full: 0,
             fps_last_log_time: Instant::now(),
+            first_crop_logged: false,
+            crop_buffer: Vec::new(),
+            cached_content_bounds: None,
+            content_bounds_counter: 0,
         })
     }
 
@@ -408,59 +439,117 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
             self.fps_last_log_time = now;
         }
 
-        // Limit to approx 30 FPS at capture source (33ms)
-        // We use 32ms to allow for slight jitter while safely dropping 60fps frames (16ms)
-        if now.duration_since(self.last_frame_time) < Duration::from_millis(32) {
+        // Process at ~30 FPS (33ms). WGC delivers at 60 FPS (16ms) so fresh
+        // frames are always available. Consumer has 33ms to finish before the
+        // next ROI arrives, keeping frontend updates low-latency.
+        if now.duration_since(self.last_frame_time) < Duration::from_millis(33) {
             return Ok(());
         }
         self.last_frame_time = now;
         self.fps_counter_accepted += 1;
 
-        // Crop Logic
-        // TODO: Refactor crop logic into helper if needed, but keeping here is minimal overhead compared to allocations
+        // Get window geometry for crop calculation and overlay positioning.
+        // DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS) returns the visible
+        // window rect that matches the Graphics Capture API frame (excluding
+        // invisible DWM shadow borders that GetWindowRect incorrectly includes).
+        let mut dwm_rect = RECT::default();
         let mut client_rect = RECT::default();
-        let mut window_rect = RECT::default();
         let mut client_point = POINT { x: 0, y: 0 };
-        let mut crop_x = 0;
-        let mut crop_y = 0;
-        let mut crop_w = frame.width();
-        let mut crop_h = frame.height();
-
+        let dwm_ok;
         unsafe {
             let hwnd = HWND(self.hwnd as *mut std::ffi::c_void);
+            dwm_ok = DwmGetWindowAttribute(
+                hwnd,
+                DWMWA_EXTENDED_FRAME_BOUNDS,
+                &mut dwm_rect as *mut _ as *mut std::ffi::c_void,
+                std::mem::size_of::<RECT>() as u32,
+            )
+            .is_ok();
             let _ = GetClientRect(hwnd, &mut client_rect);
-            let _ = GetWindowRect(hwnd, &mut window_rect);
             let _ = ClientToScreen(hwnd, &mut client_point);
-
-            if window_rect.right > window_rect.left && window_rect.bottom > window_rect.top {
-                let offset_x = client_point.x - window_rect.left;
-                let offset_y = client_point.y - window_rect.top;
-                if offset_x >= 0 && offset_y >= 0 {
-                    crop_x = offset_x as u32;
-                    crop_y = offset_y as u32;
-                    let cw = client_rect.right - client_rect.left;
-                    let ch = client_rect.bottom - client_rect.top;
-                    let fw = frame.width() as i32;
-                    let fh = frame.height() as i32;
-                    if (crop_x as i32 + cw) <= fw && (crop_y as i32 + ch) <= fh {
-                        crop_w = cw as u32;
-                        crop_h = ch as u32;
-                    }
-                }
-            }
         }
 
-        let mut buffer_result = frame.buffer_crop(crop_x, crop_y, crop_x + crop_w, crop_y + crop_h);
-        if buffer_result.is_err() {
-            buffer_result = frame.buffer(); // Fallback
-        }
+        // Calculate client area offset within capture frame.
+        // If DWM is unavailable (remote desktop, DWM disabled), fall back to
+        // no crop — full frame is processed as-is.
+        let (offset_x, offset_y) = if dwm_ok {
+            (
+                (client_point.x - dwm_rect.left).max(0) as u32,
+                (client_point.y - dwm_rect.top).max(0) as u32,
+            )
+        } else {
+            (0, 0)
+        };
+        let client_width = client_rect.right as u32;
+        let client_height = client_rect.bottom as u32;
+
+        // Always use frame.buffer() — proven stable. Software crop below
+        // extracts client area safely (avoids D3D11 buffer_crop issues).
+        let buffer_result = frame.buffer();
 
         if let Ok(mut buffer) = buffer_result {
-            let full_width = buffer.width();
-            let full_height = buffer.height();
+            let frame_width = buffer.width();
+            let frame_height = buffer.height();
+
+            if !self.first_crop_logged {
+                self.first_crop_logged = true;
+                println!(
+                    "[Crop Debug] frame={}x{}, dwm=({},{},{},{}), client_pt=({},{}), client={}x{}, offset=({},{})",
+                    frame_width, frame_height,
+                    dwm_rect.left, dwm_rect.top, dwm_rect.right, dwm_rect.bottom,
+                    client_point.x, client_point.y,
+                    client_width, client_height,
+                    offset_x, offset_y,
+                );
+            }
 
             if let Ok(packed_slice) = buffer.as_nopadding_buffer() {
-                // Full screenshot: saved in Producer since Consumer only gets ROI data
+                // Software crop: extract client area from full frame
+                // This removes the title bar and window borders safely in CPU,
+                // avoiding D3D11 buffer_crop which can cause allocation issues.
+                // Uses self.crop_buffer to reuse allocation across frames.
+                let crop_w = client_width.min(frame_width.saturating_sub(offset_x));
+                let crop_h = client_height.min(frame_height.saturating_sub(offset_y));
+                let (work_data, work_width, work_height): (&[u8], u32, u32) =
+                    if (offset_x > 0 || offset_y > 0) && crop_w > 0 && crop_h > 0 {
+                        self.crop_buffer.clear();
+                        let row_bytes = crop_w as usize * 4;
+                        let mut actual_h = 0u32;
+                        for y in 0..crop_h {
+                            let src = (offset_y + y) as usize * frame_width as usize * 4
+                                + offset_x as usize * 4;
+                            let end = src + row_bytes;
+                            if end <= packed_slice.len() {
+                                self.crop_buffer.extend_from_slice(&packed_slice[src..end]);
+                                actual_h += 1;
+                            } else {
+                                break;
+                            }
+                        }
+                        (&self.crop_buffer, crop_w, actual_h)
+                    } else {
+                        (packed_slice, frame_width, frame_height)
+                    };
+
+                // Detect content bounds (exclude black bars from game rendering)
+                // Cached: recompute every 150 frames (~5s) since black bars are static
+                self.content_bounds_counter += 1;
+                let (content_width, content_height) =
+                    if let Some(bounds) = self.cached_content_bounds {
+                        if self.content_bounds_counter % 150 == 0 {
+                            let b = detect_content_bounds(&work_data, work_width, work_height, 4);
+                            self.cached_content_bounds = Some(b);
+                            b
+                        } else {
+                            bounds
+                        }
+                    } else {
+                        let b = detect_content_bounds(&work_data, work_width, work_height, 4);
+                        self.cached_content_bounds = Some(b);
+                        b
+                    };
+
+                // Full screenshot: save game content area (after title bar + black bar removal)
                 {
                     let mut flag = self.debug_state.should_full_screenshot.lock().unwrap();
                     if *flag {
@@ -470,14 +559,31 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                             .unwrap()
                             .join("output");
                         let _ = std::fs::create_dir_all(&debug_output_dir);
-                        let path = debug_output_dir.join("full_screenshot.png");
-                        // Convert BGRA to RGB
-                        let mut rgb = Vec::with_capacity((full_width * full_height * 3) as usize);
-                        for chunk in packed_slice.chunks_exact(4) {
-                            rgb.extend_from_slice(&chunk[0..3]);
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap();
+                        let secs = now.as_secs();
+                        let millis = now.subsec_millis();
+                        let h = (secs / 3600) % 24;
+                        let m = (secs / 60) % 60;
+                        let s = secs % 60;
+                        let path = debug_output_dir.join(format!(
+                            "full_screenshot_{:02}{:02}{:02}_{:03}.png",
+                            h, m, s, millis
+                        ));
+                        // Extract content area (RGBA → RGB) using work_data with stride = work_width
+                        let mut rgb = Vec::with_capacity((content_width * content_height * 3) as usize);
+                        for y in 0..content_height {
+                            let row_start = (y * work_width) as usize * 4;
+                            let row_end = row_start + content_width as usize * 4;
+                            if row_end <= work_data.len() {
+                                for chunk in work_data[row_start..row_end].chunks_exact(4) {
+                                    rgb.extend_from_slice(&chunk[0..3]);
+                                }
+                            }
                         }
                         if let Some(img) = image::ImageBuffer::<image::Rgb<u8>, Vec<u8>>::from_raw(
-                            full_width, full_height, rgb,
+                            content_width, content_height, rgb,
                         ) {
                             let _ = img.save(&path);
                             println!("Full screenshot saved to {:?}", path);
@@ -486,22 +592,23 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                 }
 
                 // OPTIMIZATION: Copy Header Strip (Timer + Pause Button)
-                // Timer ROI: x 85%-93%
-                // Pause ROI: x 92%-100%
-                // Combined: x 85%-100%
-                let roi_x_start = (full_width as f32 * 0.85) as u32;
-                let roi_x_end = full_width; // 100%
-                let roi_y_start = (full_height as f32 * 0.035) as u32;
-                let roi_y_end = (full_height as f32 * 0.063) as u32;
+                // Timer ROI: x 85.39%-100%, y 3.60%-6.51%
+                // ROI percentages are content-relative (excluding black bars)
+                let roi_x_start = (content_width as f32 * 0.8539) as u32;
+                let roi_x_end = content_width; // 100% of content
+                let roi_y_start = (content_height as f32 * 0.0360) as u32;
+                let roi_y_end = (content_height as f32 * 0.0651) as u32;
 
                 let roi_width = roi_x_end.saturating_sub(roi_x_start);
                 let roi_height = roi_y_end.saturating_sub(roi_y_start);
 
-                // Cost Gauge ROI: x 64%-89%, y 91.0%-93.2%
-                let cost_x_start = (full_width as f32 * 0.64) as u32;
-                let cost_x_end = (full_width as f32 * 0.89) as u32;
-                let cost_y_start = (full_height as f32 * 0.910) as u32;
-                let cost_y_end = (full_height as f32 * 0.932) as u32;
+                // Cost Gauge ROI (content-relative)
+                // Original pixels at 3416x1993: x=2186..3040, y=1813..1857
+                // Content-relative at 3400x1921:
+                let cost_x_start = (content_width as f32 * 0.6429) as u32;
+                let cost_x_end = (content_width as f32 * 0.8941) as u32;
+                let cost_y_start = (content_height as f32 * 0.9438) as u32;
+                let cost_y_end = (content_height as f32 * 0.9667) as u32;
 
                 let cost_roi_width = cost_x_end.saturating_sub(cost_x_start);
                 let cost_roi_height = cost_y_end.saturating_sub(cost_y_start);
@@ -510,12 +617,12 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                     let pixel_count = (roi_width * roi_height) as usize;
                     let mut rgb_data = Vec::with_capacity(pixel_count * 3);
 
-                    // Extract only ROI pixels (much smaller than full frame)
+                    // Extract only ROI pixels (stride = work_width, no padding)
                     for y in roi_y_start..roi_y_end {
-                        let row_start = (y * full_width + roi_x_start) as usize * 4;
-                        let row_end = (y * full_width + roi_x_end) as usize * 4;
-                        if row_end <= packed_slice.len() {
-                            for chunk in packed_slice[row_start..row_end].chunks_exact(4) {
+                        let row_start = (y * work_width + roi_x_start) as usize * 4;
+                        let row_end = (y * work_width + roi_x_end) as usize * 4;
+                        if row_end <= work_data.len() {
+                            for chunk in work_data[row_start..row_end].chunks_exact(4) {
                                 rgb_data.extend_from_slice(&chunk[0..3]);
                             }
                         }
@@ -527,10 +634,10 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                         let cost_pixel_count = (cost_roi_width * cost_roi_height) as usize;
                         cost_rgb_data.reserve(cost_pixel_count * 3);
                         for y in cost_y_start..cost_y_end {
-                            let row_start = (y * full_width + cost_x_start) as usize * 4;
-                            let row_end = (y * full_width + cost_x_end) as usize * 4;
-                            if row_end <= packed_slice.len() {
-                                for chunk in packed_slice[row_start..row_end].chunks_exact(4) {
+                            let row_start = (y * work_width + cost_x_start) as usize * 4;
+                            let row_end = (y * work_width + cost_x_end) as usize * 4;
+                            if row_end <= work_data.len() {
+                                for chunk in work_data[row_start..row_end].chunks_exact(4) {
                                     cost_rgb_data.extend_from_slice(&chunk[0..3]);
                                 }
                             }
@@ -538,11 +645,30 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                     }
 
                     // Sample center brightness for Paused/Slow state detection
+                    // Uses content dimensions for center point, work_width for stride
                     let center_brightness =
-                        sample_center_brightness(packed_slice, full_width, full_height);
-                    // NCC template matching for PAUSE dialog detection (RGBA input)
-                    let pause_match_score =
-                        crate::core::combat_intel::detect_pause_text_rgba(packed_slice, full_width, full_height);
+                        sample_center_brightness(&work_data, work_width, content_width, content_height);
+
+                    // Extract PAUSE ROI for consumer-side NCC matching (cheap crop only)
+                    use crate::core::combat_intel::{
+                        PAUSE_ROI_X_START, PAUSE_ROI_X_END,
+                        PAUSE_ROI_Y_START, PAUSE_ROI_Y_END,
+                    };
+                    let pause_x_start = (content_width as f32 * PAUSE_ROI_X_START) as u32;
+                    let pause_x_end = (content_width as f32 * PAUSE_ROI_X_END) as u32;
+                    let pause_y_start = (content_height as f32 * PAUSE_ROI_Y_START) as u32;
+                    let pause_y_end = (content_height as f32 * PAUSE_ROI_Y_END) as u32;
+                    let pause_roi_width = pause_x_end.saturating_sub(pause_x_start);
+                    let pause_roi_height = pause_y_end.saturating_sub(pause_y_start);
+
+                    let mut pause_roi_rgba = Vec::with_capacity((pause_roi_width * pause_roi_height * 4) as usize);
+                    for y in pause_y_start..pause_y_end {
+                        let src_start = (y * work_width + pause_x_start) as usize * 4;
+                        let src_end = (y * work_width + pause_x_end) as usize * 4;
+                        if src_end <= work_data.len() {
+                            pause_roi_rgba.extend_from_slice(&work_data[src_start..src_end]);
+                        }
+                    }
 
                     let payload = CapturePayload {
                         rgb_data,
@@ -553,10 +679,12 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                         cost_roi_height,
                         client_x: client_point.x,
                         client_y: client_point.y,
-                        client_width: full_width,
-                        client_height: full_height,
+                        client_width: content_width,
+                        client_height: content_height,
                         center_brightness,
-                        pause_match_score,
+                        pause_roi_rgba,
+                        pause_roi_width,
+                        pause_roi_height,
                     };
 
                     // Conflating Push: Overwrite any pending frame with the latest one
@@ -584,22 +712,99 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
     }
 }
 
+/// Detect content boundaries by scanning from right/bottom edges inward.
+///
+/// Window captures often include fixed black bars (e.g. right 16px, bottom 72px).
+/// This function finds where actual content ends by sampling pixel brightness.
+///
+/// # Arguments
+/// * `data` - Raw pixel data (RGB8 or BGRA8)
+/// * `width` - Full buffer width
+/// * `height` - Full buffer height
+/// * `bpp` - Bytes per pixel (3 for RGB, 4 for BGRA/RGBA)
+///
+/// # Returns
+/// `(content_width, content_height)` — dimensions of the non-black content area.
+/// Content is anchored at top-left (0,0). Returns full dimensions if no black bars detected.
+pub fn detect_content_bounds(data: &[u8], width: u32, height: u32, bpp: u32) -> (u32, u32) {
+    const SAMPLE_COUNT: u32 = 10;
+    const BRIGHTNESS_THRESHOLD: u8 = 10;
+
+    // Scan columns from right edge inward to find content_width
+    // Initialize to 0; if no content found, safety clamp to 1
+    let mut content_width = 0u32;
+    for x in (0..width).rev() {
+        let mut has_content = false;
+        let step = (height / SAMPLE_COUNT).max(1);
+        for i in 0..SAMPLE_COUNT {
+            let y = (i * step).min(height.saturating_sub(1));
+            let idx = ((y * width + x) * bpp) as usize;
+            if idx + 2 < data.len() {
+                let r = data[idx];
+                let g = data[idx + 1];
+                let b = data[idx + 2];
+                if r > BRIGHTNESS_THRESHOLD || g > BRIGHTNESS_THRESHOLD || b > BRIGHTNESS_THRESHOLD {
+                    has_content = true;
+                    break;
+                }
+            }
+        }
+        if has_content {
+            content_width = x + 1;
+            break;
+        }
+    }
+
+    // Scan rows from bottom edge upward to find content_height
+    let mut content_height = 0u32;
+    for y in (0..height).rev() {
+        let mut has_content = false;
+        let step = (width / SAMPLE_COUNT).max(1);
+        for i in 0..SAMPLE_COUNT {
+            let x = (i * step).min(width.saturating_sub(1));
+            let idx = ((y * width + x) * bpp) as usize;
+            if idx + 2 < data.len() {
+                let r = data[idx];
+                let g = data[idx + 1];
+                let b = data[idx + 2];
+                if r > BRIGHTNESS_THRESHOLD || g > BRIGHTNESS_THRESHOLD || b > BRIGHTNESS_THRESHOLD {
+                    has_content = true;
+                    break;
+                }
+            }
+        }
+        if has_content {
+            content_height = y + 1;
+            break;
+        }
+    }
+
+    // Safety: never return zero dimensions
+    (content_width.max(1), content_height.max(1))
+}
+
 /// Sample average brightness from a 10x10 pixel region at the frame center.
 ///
 /// Uses ITU-R BT.601 perceived brightness (0.299R + 0.587G + 0.114B).
 /// Input is RGBA8 packed pixel data (4 bytes per pixel).
 ///
+/// # Arguments
+/// * `rgba_data` - RGBA8 packed pixel buffer
+/// * `stride_width` - Buffer stride width (full buffer row width including black bars)
+/// * `content_width` - Content area width (used to compute center point)
+/// * `content_height` - Content area height (used to compute center point)
+///
 /// Returns average brightness (0.0–255.0), or 0.0 if the frame is too small.
-pub fn sample_center_brightness(rgba_data: &[u8], width: u32, height: u32) -> f32 {
-    let cx = width / 2;
-    let cy = height / 2;
+pub fn sample_center_brightness(rgba_data: &[u8], stride_width: u32, content_width: u32, content_height: u32) -> f32 {
+    let cx = content_width / 2;
+    let cy = content_height / 2;
     let mut br_sum = 0u64;
     let mut br_count = 0u32;
     for dy in 0..10u32 {
         for dx in 0..10u32 {
             let sx = cx.saturating_sub(5) + dx;
             let sy = cy.saturating_sub(5) + dy;
-            let idx = ((sy * width + sx) * 4) as usize;
+            let idx = ((sy * stride_width + sx) * 4) as usize;
             if idx + 2 < rgba_data.len() {
                 br_sum += (299 * rgba_data[idx] as u64
                     + 587 * rgba_data[idx + 1] as u64
@@ -676,7 +881,7 @@ mod tests {
     fn test_sample_center_brightness_white() {
         // Pure white (255,255,255) → brightness = 255
         let data = make_rgba_frame(100, 100, 255, 255, 255);
-        let brightness = sample_center_brightness(&data, 100, 100);
+        let brightness = sample_center_brightness(&data, 100, 100, 100);
         assert!((brightness - 255.0).abs() < 1.0, "Expected ~255, got {}", brightness);
     }
 
@@ -684,7 +889,7 @@ mod tests {
     fn test_sample_center_brightness_black() {
         // Pure black (0,0,0) → brightness = 0
         let data = make_rgba_frame(100, 100, 0, 0, 0);
-        let brightness = sample_center_brightness(&data, 100, 100);
+        let brightness = sample_center_brightness(&data, 100, 100, 100);
         assert!((brightness - 0.0).abs() < 0.01, "Expected ~0, got {}", brightness);
     }
 
@@ -692,13 +897,13 @@ mod tests {
     fn test_sample_center_brightness_gray() {
         // Mid gray (128,128,128) → brightness ≈ 128
         let data = make_rgba_frame(100, 100, 128, 128, 128);
-        let brightness = sample_center_brightness(&data, 100, 100);
+        let brightness = sample_center_brightness(&data, 100, 100, 100);
         assert!((brightness - 128.0).abs() < 1.0, "Expected ~128, got {}", brightness);
     }
 
     #[test]
     fn test_sample_center_brightness_empty() {
-        let brightness = sample_center_brightness(&[], 0, 0);
+        let brightness = sample_center_brightness(&[], 0, 0, 0);
         assert_eq!(brightness, 0.0);
     }
 
@@ -706,8 +911,87 @@ mod tests {
     fn test_sample_center_brightness_small_frame() {
         // 5x5 frame: center is at (2,2), sampling 10x10 but only some pixels exist
         let data = make_rgba_frame(5, 5, 200, 200, 200);
-        let brightness = sample_center_brightness(&data, 5, 5);
+        let brightness = sample_center_brightness(&data, 5, 5, 5);
         // Should still return a value (partial sampling)
         assert!(brightness > 100.0, "Expected >100, got {}", brightness);
+    }
+
+    #[test]
+    fn test_detect_content_bounds_all_screenshots() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let images = [
+            "battle-active.png",
+            "battle-pause.png",
+            "battle-slow.png",
+            "home.png",
+            "home-noui.png",
+            "min-battle-pause.png",
+            "min-home.png",
+        ];
+
+        for filename in images {
+            let path = format!("{}/tests/fixtures/screenshots/{}", manifest_dir, filename);
+            let img = match image::open(&path) {
+                Ok(img) => img,
+                Err(_) => continue,
+            };
+            let rgb_img = img.to_rgb8();
+            let (width, height) = rgb_img.dimensions();
+            let rgb_data = rgb_img.into_raw();
+
+            let (cw, ch) = detect_content_bounds(&rgb_data, width, height, 3);
+
+            // Check left edge: scan first 30 columns, ALL rows (dense scan)
+            let mut left_bar = 0u32;
+            for x in 0..width.min(30) {
+                let mut all_black = true;
+                for y in 0..height {
+                    let idx = ((y * width + x) * 3) as usize;
+                    if idx + 2 < rgb_data.len() {
+                        if rgb_data[idx] > 10 || rgb_data[idx + 1] > 10 || rgb_data[idx + 2] > 10 {
+                            all_black = false;
+                            break;
+                        }
+                    }
+                }
+                if all_black { left_bar = x + 1; } else { break; }
+            }
+
+            // Check top edge: scan first 30 rows, ALL columns
+            let mut top_bar = 0u32;
+            for y in 0..height.min(30) {
+                let mut all_black = true;
+                for x in 0..width {
+                    let idx = ((y * width + x) * 3) as usize;
+                    if idx + 2 < rgb_data.len() {
+                        if rgb_data[idx] > 10 || rgb_data[idx + 1] > 10 || rgb_data[idx + 2] > 10 {
+                            all_black = false;
+                            break;
+                        }
+                    }
+                }
+                if all_black { top_bar = y + 1; } else { break; }
+            }
+
+            println!("{}: raw={}x{}, content={}x{}, left_bar={}px, top_bar={}px, right_bar={}px, bottom_bar={}px",
+                filename, width, height, cw, ch,
+                left_bar, top_bar, width - cw, height - ch);
+        }
+    }
+
+    #[test]
+    fn test_detect_content_bounds_no_black_bars() {
+        // Image with no black bars should return full dimensions
+        let data = make_rgba_frame(100, 80, 128, 128, 128);
+        let (cw, ch) = detect_content_bounds(&data, 100, 80, 4);
+        assert_eq!((cw, ch), (100, 80));
+    }
+
+    #[test]
+    fn test_detect_content_bounds_all_black() {
+        // All-black image should return (1, 1) (safety minimum)
+        let data = make_rgba_frame(100, 80, 0, 0, 0);
+        let (cw, ch) = detect_content_bounds(&data, 100, 80, 4);
+        assert_eq!((cw, ch), (1, 1));
     }
 }
