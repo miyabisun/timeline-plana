@@ -353,13 +353,12 @@ mod tests {
     }
 
     /// Extract the cost gauge ROI from a full-screen image (content-relative).
-    /// Original pixels at 3416x1993: x=2186..3040, y=1813..1857
-    /// Content-relative at 3400x1921: x=64.29%..89.41%, y=94.38%..96.67%
+    /// Content-relative: x=64.49%..89.61%, y=94.68%..96.97%
     fn extract_cost_roi(rgb_data: &[u8], width: u32, height: u32) -> (Vec<u8>, u32, u32) {
-        let x_start = (width as f32 * 0.6429) as u32;
-        let x_end = (width as f32 * 0.8941) as u32;
-        let y_start = (height as f32 * 0.9438) as u32;
-        let y_end = (height as f32 * 0.9667) as u32;
+        let x_start = (width as f32 * 0.6449) as u32;
+        let x_end = (width as f32 * 0.8961) as u32;
+        let y_start = (height as f32 * 0.9468) as u32;
+        let y_end = (height as f32 * 0.9697) as u32;
 
         let roi_w = x_end - x_start;
         let roi_h = y_end - y_start;
@@ -437,8 +436,8 @@ mod tests {
         let cost = result.unwrap();
         assert_eq!(cost.max_cost, 10);
         assert!(
-            cost.current >= 6.0 && cost.current <= 7.5,
-            "Expected current cost 6.0-7.5 in slow, got {}",
+            cost.current >= 7.0 && cost.current <= 8.5,
+            "Expected current cost 7.0-8.5 in slow, got {}",
             cost.current
         );
     }

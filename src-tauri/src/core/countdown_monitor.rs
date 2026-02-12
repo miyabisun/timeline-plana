@@ -9,40 +9,67 @@
 //! 2. Normalize ROI to reference resolution (273px wide)
 //! 3. Apply skew correction to straighten italic text
 //! 4. Binarize with adaptive threshold
-//! 5. Template matching OCR for digit recognition
-//! 6. Parse and validate timer value
-//!
+//! 5. Separator-first resolution probe (norm vs min templates)
+//! 6. Field-based OCR with disambiguation
+//! 7. Parse and validate timer value
 
 use image::{imageops::FilterType, GrayImage, Luma, RgbImage};
 use std::sync::OnceLock;
 
-// Embed templates
-static TEMPLATES: OnceLock<Vec<(u8, GrayImage)>> = OnceLock::new();
+// ============================================================================
+// Template Embedding
+// ============================================================================
 
-fn get_templates() -> &'static Vec<(u8, GrayImage)> {
-    TEMPLATES.get_or_init(|| {
-        let mut t = Vec::new();
-        let load_tmpl = |bytes: &[u8], label: u8| {
-            let img = image::load_from_memory(bytes)
-                .expect("Failed to load template")
-                .to_luma8();
-            (label, img)
-        };
+struct TemplateSet {
+    digits: Vec<(u8, GrayImage)>, // 0-9
+    colon: GrayImage,
+    dot: GrayImage,
+}
 
-        t.push(load_tmpl(include_bytes!("templates/0.png"), 0));
-        t.push(load_tmpl(include_bytes!("templates/1.png"), 1));
-        t.push(load_tmpl(include_bytes!("templates/2.png"), 2));
-        t.push(load_tmpl(include_bytes!("templates/3.png"), 3));
-        t.push(load_tmpl(include_bytes!("templates/4.png"), 4));
-        t.push(load_tmpl(include_bytes!("templates/5.png"), 5));
-        t.push(load_tmpl(include_bytes!("templates/6.png"), 6));
-        t.push(load_tmpl(include_bytes!("templates/7.png"), 7));
-        t.push(load_tmpl(include_bytes!("templates/8.png"), 8));
-        t.push(load_tmpl(include_bytes!("templates/9.png"), 9));
-        t.push(load_tmpl(include_bytes!("templates/colon.png"), 10)); // 10 = colon
-        t.push(load_tmpl(include_bytes!("templates/dot.png"), 11)); // 11 = dot
+static NORM_TMPL: OnceLock<TemplateSet> = OnceLock::new();
+static MIN_TMPL: OnceLock<TemplateSet> = OnceLock::new();
 
-        t
+fn load_tmpl(bytes: &[u8]) -> GrayImage {
+    image::load_from_memory(bytes)
+        .expect("Failed to load template")
+        .to_luma8()
+}
+
+fn get_norm_templates() -> &'static TemplateSet {
+    NORM_TMPL.get_or_init(|| TemplateSet {
+        digits: vec![
+            (0, load_tmpl(include_bytes!("templates/normal/0.png"))),
+            (1, load_tmpl(include_bytes!("templates/normal/1.png"))),
+            (2, load_tmpl(include_bytes!("templates/normal/2.png"))),
+            (3, load_tmpl(include_bytes!("templates/normal/3.png"))),
+            (4, load_tmpl(include_bytes!("templates/normal/4.png"))),
+            (5, load_tmpl(include_bytes!("templates/normal/5.png"))),
+            (6, load_tmpl(include_bytes!("templates/normal/6.png"))),
+            (7, load_tmpl(include_bytes!("templates/normal/7.png"))),
+            (8, load_tmpl(include_bytes!("templates/normal/8.png"))),
+            (9, load_tmpl(include_bytes!("templates/normal/9.png"))),
+        ],
+        colon: load_tmpl(include_bytes!("templates/normal/colon.png")),
+        dot: load_tmpl(include_bytes!("templates/normal/dot.png")),
+    })
+}
+
+fn get_min_templates() -> &'static TemplateSet {
+    MIN_TMPL.get_or_init(|| TemplateSet {
+        digits: vec![
+            (0, load_tmpl(include_bytes!("templates/min/0.png"))),
+            (1, load_tmpl(include_bytes!("templates/min/1.png"))),
+            (2, load_tmpl(include_bytes!("templates/min/2.png"))),
+            (3, load_tmpl(include_bytes!("templates/min/3.png"))),
+            (4, load_tmpl(include_bytes!("templates/min/4.png"))),
+            (5, load_tmpl(include_bytes!("templates/min/5.png"))),
+            (6, load_tmpl(include_bytes!("templates/min/6.png"))),
+            (7, load_tmpl(include_bytes!("templates/min/7.png"))),
+            (8, load_tmpl(include_bytes!("templates/min/8.png"))),
+            (9, load_tmpl(include_bytes!("templates/min/9.png"))),
+        ],
+        colon: load_tmpl(include_bytes!("templates/min/colon.png")),
+        dot: load_tmpl(include_bytes!("templates/min/dot.png")),
     })
 }
 
@@ -65,8 +92,8 @@ impl Default for TimerROI {
         // Content-relative percentages (excluding window capture black bars)
         // Target pixels at 3400x1921: x=2903..3176, y=69..125
         TimerROI {
-            x_start_pct: 0.8539, // 2903/3400 — skip clock icon completely
-            x_end_pct: 0.9342,   // 3176/3400 — avoid brown corner
+            x_start_pct: 0.8549, // shifted right 0.1% from 85.39%
+            x_end_pct: 0.9352,   // shifted right 0.1% from 93.42%
             y_start_pct: 0.0360, // 69/1921 — shifted down for vertical centering
             y_end_pct: 0.0651,   // 125/1921 — end with buffer for window scaling
         }
@@ -171,7 +198,7 @@ pub fn normalize_roi(rgb_data: &[u8], width: u32, height: u32) -> (Vec<u8>, u32,
 /// * `rgb_data` - RGB8 pixel data
 /// * `width` - Image width
 /// * `height` - Image height
-/// * `skew_factor` - Shear factor (0.45 for Blue Archive timer)
+/// * `skew_factor` - Shear factor (0.25 for Blue Archive timer)
 ///
 /// # Returns
 /// Tuple of (corrected RGB data, new width, height)
@@ -244,21 +271,6 @@ const TARGET_WHITE_RATIO: f32 = 0.15;
 
 /// Minimum column sum ratio to consider as part of a character
 const COLUMN_THRESHOLD_RATIO: f32 = 0.05;
-
-/// Expected digit positions (approximate percentage of width)
-/// Format: 0M:SS.mmm (9 characters including separators)
-#[allow(dead_code)]
-const DIGIT_POSITIONS: [f32; 9] = [
-    0.02, // 0 (always 0)
-    0.13, // M (minutes)
-    0.26, // : (colon)
-    0.37, // S (tens of seconds)
-    0.50, // S (seconds)
-    0.62, // . (period)
-    0.73, // m (hundreds ms)
-    0.84, // m (tens ms) - only 0/3/6
-    0.95, // m (ms) - only 0/3/7
-];
 
 /// Timer recognition result
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -433,129 +445,132 @@ pub fn snap_ms_to_valid(ms: u16) -> u16 {
     hundreds * 100 + snapped
 }
 
-/// Template-based digit recognition
-/// Returns (digit, confidence)
-pub fn recognize_digit(
+// ============================================================================
+// SAD Matching & Disambiguation (production helpers)
+// ============================================================================
+
+/// Match a segment against a template using SAD, return normalized score (0.0=perfect, 1.0=worst)
+fn match_segment_sad(
     binary: &[u8],
     width: u32,
     height: u32,
     x_start: u32,
     x_end: u32,
-) -> (u8, f32) {
+    template: &GrayImage,
+) -> f32 {
     let seg_width = x_end.saturating_sub(x_start) + 1;
-    if seg_width < 3 {
-        return (0, 0.0);
+    if seg_width < 2 {
+        return 1.0;
     }
 
-    // Crop segment to GrayImage
     let mut segment_img = GrayImage::new(seg_width, height);
     for y in 0..height {
         for x in 0..seg_width {
             let src_idx = (y * width + (x_start + x)) as usize;
-            let val = if src_idx < binary.len() {
-                binary[src_idx]
-            } else {
-                0
-            };
+            let val = if src_idx < binary.len() { binary[src_idx] } else { 0 };
             segment_img.put_pixel(x, y, Luma([val]));
         }
     }
 
-    let templates = get_templates();
-    let mut best_label = 255;
-    let mut best_score = u64::MAX;
-    let mut second_best_score = u64::MAX;
+    let resized = image::imageops::resize(
+        &segment_img,
+        template.width(),
+        template.height(),
+        FilterType::Triangle,
+    );
 
-    // Aspect ratio of the input segment
-    let ar_in = seg_width as f32 / height as f32;
-
-    for (label, tmpl_img) in templates {
-        // Validation: Check aspect ratio similarity
-        // If width differs significantly, it's likely a different type of character
-        // e.g. '0' (Wide) vs ':' (Narrow)
-        let ar_tm = tmpl_img.width() as f32 / tmpl_img.height() as f32;
-        let diff_ratio = (ar_in - ar_tm).abs() / ar_tm.max(0.01);
-
-        // Penalty for large aspect ratio mismatch (> 50%)
-        let penalty = if diff_ratio > 0.5 {
-            100_000_000 // Huge penalty invalidates this match
-        } else {
-            0
-        };
-
-        // Resize segment to match template size
-        // Using Triangle for stability
-        let resized = image::imageops::resize(
-            &segment_img,
-            tmpl_img.width(),
-            tmpl_img.height(),
-            FilterType::Triangle,
-        );
-
-        // Calculate SAD (Sum of Absolute Differences)
-        let mut score: u64 = penalty;
-        if score < best_score {
-            for (p1, p2) in resized.pixels().zip(tmpl_img.pixels()) {
-                let v1 = p1.0[0] as i32;
-                let v2 = p2.0[0] as i32;
-                score += (v1 - v2).abs() as u64;
-            }
-        }
-
-        if score < best_score {
-            second_best_score = best_score;
-            best_score = score;
-            best_label = *label;
-        } else if score < second_best_score {
-            second_best_score = score;
-        }
+    let mut sad: u64 = 0;
+    let pixel_count = (template.width() * template.height()) as u64;
+    for (p1, p2) in resized.pixels().zip(template.pixels()) {
+        sad += (p1.0[0] as i64 - p2.0[0] as i64).unsigned_abs();
     }
 
-    // Calculate relative confidence
-    let confidence = if second_best_score > 0 {
-        1.0 - (best_score as f32 / second_best_score as f32)
+    // Normalize: 0.0 = perfect match, 1.0 = maximum difference (255 per pixel)
+    sad as f32 / (pixel_count as f32 * 255.0)
+}
+
+/// Compute white pixel density in a sub-region of a segment.
+/// region: (x_frac_start, x_frac_end, y_frac_start, y_frac_end) as fractions 0.0-1.0
+fn segment_region_density(
+    binary: &[u8],
+    width: u32,
+    height: u32,
+    x_start: u32,
+    x_end: u32,
+    region: (f32, f32, f32, f32),
+) -> f32 {
+    let seg_w = x_end.saturating_sub(x_start) + 1;
+    let rx0 = (seg_w as f32 * region.0) as u32;
+    let rx1 = (seg_w as f32 * region.1) as u32;
+    let ry0 = (height as f32 * region.2) as u32;
+    let ry1 = (height as f32 * region.3) as u32;
+
+    let mut white = 0u32;
+    let mut total = 0u32;
+    for y in ry0..ry1.min(height) {
+        for x in rx0..rx1.min(seg_w) {
+            total += 1;
+            let idx = (y * width + (x_start + x)) as usize;
+            if idx < binary.len() && binary[idx] > 0 {
+                white += 1;
+            }
+        }
+    }
+    if total == 0 { 0.0 } else { white as f32 / total as f32 }
+}
+
+/// Disambiguate confusable digit pairs (3/8, 0/9) using regional pixel density.
+/// Returns the corrected label if disambiguation is needed, or the original label.
+fn disambiguate_digit(
+    binary: &[u8],
+    width: u32,
+    height: u32,
+    x_start: u32,
+    x_end: u32,
+    best_label: u8,
+    best_score: f32,
+    second_label: u8,
+    second_score: f32,
+) -> u8 {
+    let score_diff = second_score - best_score;
+    // Only disambiguate when scores are very close
+    if score_diff > 0.05 {
+        return best_label;
+    }
+
+    let pair = if best_label < second_label {
+        (best_label, second_label)
     } else {
-        0.0
+        (second_label, best_label)
     };
 
-    // Low confidence threshold for debugging (optional)
-    if confidence < 0.05 && best_score > 5000 {
-        // Potential ambiguity
+    match pair {
+        (3, 8) => {
+            // 3 vs 8: check middle-left region (left 20%, vertical 30-70%)
+            // 8 has closed loops connecting on the left at mid-height → high density
+            // 3 is open on the left at mid-height → low density (0.10-0.19)
+            let mid_left = segment_region_density(
+                binary, width, height, x_start, x_end,
+                (0.0, 0.20, 0.30, 0.70),
+            );
+            if mid_left > 0.25 { 8 } else { 3 }
+        }
+        (0, 9) => {
+            // 0 vs 9: check bottom-left quadrant (left 50%, bottom 40%)
+            // 0 has closed bottom-left (higher density ~0.31), 9 has open bottom-left
+            let bl_density = segment_region_density(
+                binary, width, height, x_start, x_end,
+                (0.0, 0.50, 0.60, 1.0),
+            );
+            if bl_density > 0.17 { 0 } else { 9 }
+        }
+        _ => best_label,
     }
-
-    (best_label, confidence)
 }
 
-/// Detect if a segment is a separator (colon or period)
-pub fn is_separator(binary: &[u8], width: u32, height: u32, x_start: u32, x_end: u32) -> bool {
-    let seg_width = x_end.saturating_sub(x_start) + 1;
-
-    // Separators are typically narrow
-    if seg_width > 15 {
-        return false;
-    }
-
-    // Count vertical gaps
-    let mid_y = height / 2;
-    let mut gap_count = 0u32;
-
-    for y in (mid_y.saturating_sub(5))..=(mid_y + 5).min(height - 1) {
-        let mut has_pixel = false;
-        for x in x_start..=x_end.min(width - 1) {
-            let idx = (y * width + x) as usize;
-            if idx < binary.len() && binary[idx] > 0 {
-                has_pixel = true;
-                break;
-            }
-        }
-        if !has_pixel {
-            gap_count += 1;
-        }
-    }
-
-    // Colon has a gap in the middle
-    gap_count >= 3
-}
+// ============================================================================
+// Unified OCR Pipeline
+// ============================================================================
 
 /// Full OCR pipeline: process image and return timer value
 pub fn recognize_timer(rgb_data: &[u8], width: u32, height: u32) -> Option<TimerValue> {
@@ -583,85 +598,128 @@ pub fn recognize_timer_from_roi(rgb_data: &[u8], width: u32, height: u32) -> Opt
     recognize_timer_from_binary(&binary, skew_w, skew_h)
 }
 
-/// Parse timer digits (minutes, seconds, milliseconds) from a cleaned digit array.
+/// Core OCR logic from binary data — unified pipeline with separator-first resolution probe.
 ///
-/// Input: array of numeric digits (0-9) with separators already removed.
-/// Expected format after cleaning: `[0] M S S m m m` (5-9 digits).
-///
-/// Returns `Some((minutes, seconds, snapped_ms))` or `None` if parsing fails.
-fn parse_timer_digits(clean_digits: &[u8]) -> Option<(u8, u8, u16)> {
-    if clean_digits.len() < 5 {
+/// 1. Segment characters via column density
+/// 2. Probe both norm/min colon/dot templates to determine resolution
+/// 3. Split fields by colon/dot positions (MM:SS.mmm)
+/// 4. Recognize digits with the selected template set + disambiguation
+/// 5. Validate and return TimerValue
+pub fn recognize_timer_from_binary(binary: &[u8], width: u32, height: u32) -> Option<TimerValue> {
+    let norm = get_norm_templates();
+    let min = get_min_templates();
+
+    // Step 1: Segment
+    let segments = find_character_columns(binary, width, height);
+    if segments.len() < 5 {
         return None;
     }
 
-    let len = clean_digits.len();
+    // Step 2: Find best colon and dot from both template sets
+    let mut best_colon_idx = 0usize;
+    let mut best_colon_score = f32::MAX;
+    let mut best_colon_is_min = false;
+    let mut best_dot_idx = 0usize;
+    let mut best_dot_score = f32::MAX;
 
-    // Milliseconds: last 3 digits
-    let ms_val = (clean_digits[len - 3] as u16 * 100)
-        + (clean_digits[len - 2] as u16 * 10)
-        + (clean_digits[len - 1] as u16);
-    let snapped_ms = snap_ms_to_valid(ms_val);
+    for (i, (s, e)) in segments.iter().enumerate() {
+        let nc = match_segment_sad(binary, width, height, *s, *e, &norm.colon);
+        let mc = match_segment_sad(binary, width, height, *s, *e, &min.colon);
+        let nd = match_segment_sad(binary, width, height, *s, *e, &norm.dot);
+        let md = match_segment_sad(binary, width, height, *s, *e, &min.dot);
 
-    // Seconds: 2 digits before ms (with separator skip for 8+ digits)
-    let (s1_idx, s10_idx) = if len >= 8 {
-        (len - 5, len - 6)
-    } else {
-        (len - 4, len - 5)
-    };
+        let colon_score = nc.min(mc);
+        let is_min = mc < nc;
+        if colon_score < best_colon_score {
+            best_colon_score = colon_score;
+            best_colon_idx = i;
+            best_colon_is_min = is_min;
+        }
 
-    if s10_idx >= clean_digits.len() {
+        let dot_score = nd.min(md);
+        if dot_score < best_dot_score {
+            best_dot_score = dot_score;
+            best_dot_idx = i;
+        }
+    }
+
+    // Colon must come before dot
+    if best_colon_idx >= best_dot_idx {
         return None;
     }
 
-    let seconds_val = clean_digits[s10_idx] * 10 + clean_digits[s1_idx];
-    if seconds_val >= 60 {
+    // Step 3: Select template set based on separator probe
+    let tmpl = if best_colon_is_min { min } else { norm };
+
+    // Step 4: Split into fields
+    let min_segs: Vec<usize> = (0..best_colon_idx).collect();
+    let sec_segs: Vec<usize> = (best_colon_idx + 1..best_dot_idx).collect();
+    let ms_segs: Vec<usize> = (best_dot_idx + 1..segments.len()).collect();
+
+    // Field length validation: MM=1-2, SS=2, mmm=3
+    if min_segs.is_empty() || min_segs.len() > 2 || sec_segs.len() != 2 || ms_segs.len() != 3 {
         return None;
     }
 
-    // Minutes: digit before seconds (with separator skip for 9+ digits)
-    let mut minutes_val = 0u8;
-    if len >= 7 {
-        let m_idx = if len >= 9 {
-            s10_idx.checked_sub(2)
-        } else {
-            s10_idx.checked_sub(1)
-        };
-        if let Some(idx) = m_idx {
-            if idx < clean_digits.len() {
-                minutes_val = clean_digits[idx];
+    // Step 5: Recognize each digit
+    let mut digits = Vec::new();
+    let mut confidences = Vec::new();
+    for &seg_i in min_segs.iter().chain(sec_segs.iter()).chain(ms_segs.iter()) {
+        let (s, e) = segments[seg_i];
+        let mut best_label = 255u8;
+        let mut best_score = f32::MAX;
+        let mut second_label = 255u8;
+        let mut second_score = f32::MAX;
+        for (lbl, t) in &tmpl.digits {
+            let score = match_segment_sad(binary, width, height, s, e, t);
+            if score < best_score {
+                second_score = best_score;
+                second_label = best_label;
+                best_score = score;
+                best_label = *lbl;
+            } else if score < second_score {
+                second_score = score;
+                second_label = *lbl;
             }
         }
+        let final_label = disambiguate_digit(
+            binary, width, height, s, e,
+            best_label, best_score, second_label, second_score,
+        );
+        digits.push(final_label);
+
+        // Confidence: relative gap between best and second-best
+        let conf = if second_score > 0.0 {
+            1.0 - (best_score / second_score)
+        } else {
+            0.0
+        };
+        confidences.push(conf);
     }
 
-    // Minutes must be single digit (0-9)
-    if minutes_val >= 10 {
+    // Step 6: Parse fields
+    let min_count = min_segs.len();
+    let sec_start = min_count;
+
+    let minutes_raw: u16 = if min_count == 2 {
+        digits[0] as u16 * 10 + digits[1] as u16
+    } else {
+        digits[0] as u16
+    };
+
+    let seconds_raw: u16 = digits[sec_start] as u16 * 10 + digits[sec_start + 1] as u16;
+
+    let ms_start = min_count + 2; // sec_count is always 2
+    let ms_raw: u16 = digits[ms_start] as u16 * 100
+        + digits[ms_start + 1] as u16 * 10
+        + digits[ms_start + 2] as u16;
+    let ms = snap_ms_to_valid(ms_raw);
+
+    if minutes_raw >= 60 || seconds_raw >= 60 {
         return None;
     }
-
-    // Note: ms validation is handled by snap_ms_to_valid() which always produces
-    // a valid X00/X33/X67 pattern. Explicit validate_ms_pattern() check is unnecessary.
-
-    Some((minutes_val, seconds_val, snapped_ms))
-}
-
-/// Core OCR logic from binary data
-pub fn recognize_timer_from_binary(binary: &[u8], width: u32, height: u32) -> Option<TimerValue> {
-    let segments = find_character_columns(binary, width, height);
-
-    let mut confidences: Vec<f32> = Vec::new();
-    let mut clean_digits = Vec::new();
-    let mut clean_confs = Vec::new();
-
-    for (start, end) in &segments {
-        let (digit, conf) = recognize_digit(binary, width, height, *start, *end);
-        confidences.push(conf);
-        if digit < 10 {
-            clean_digits.push(digit);
-            clean_confs.push(conf);
-        }
-    }
-
-    let (minutes_val, seconds_val, snapped_ms) = parse_timer_digits(&clean_digits)?;
+    let minutes = minutes_raw as u8;
+    let seconds = seconds_raw as u8;
 
     let avg_conf = if confidences.is_empty() {
         0.0
@@ -669,9 +727,8 @@ pub fn recognize_timer_from_binary(binary: &[u8], width: u32, height: u32) -> Op
         confidences.iter().sum::<f32>() / confidences.len() as f32
     };
 
-    let mut timer = TimerValue::new(minutes_val, seconds_val, snapped_ms, avg_conf);
-
-    for (i, &conf) in clean_confs.iter().take(7).enumerate() {
+    let mut timer = TimerValue::new(minutes, seconds, ms, avg_conf);
+    for (i, &conf) in confidences.iter().take(7).enumerate() {
         timer.digit_confidence[i] = conf;
     }
 
@@ -796,7 +853,6 @@ mod tests {
     fn test_binarization() {
         let (rgb_data, width, height) = load_test_image("battle-active.png");
         let (processed, proc_w, proc_h) = process_timer_region(&rgb_data, width, height);
-
         let binary = binarize_for_ocr(&processed, proc_w, proc_h);
 
         // Count white pixels
@@ -878,57 +934,6 @@ mod tests {
     }
 
     #[test]
-    fn test_is_separator_narrow_with_gap() {
-        // Create a binary image with a narrow column that has a gap in the middle (colon-like)
-        let width = 20u32;
-        let height = 20u32;
-        let mut binary = vec![0u8; (width * height) as usize];
-        // Draw pixels at top and bottom of a narrow column (x=8..=10), skip middle
-        for y in 0..height {
-            if y < 5 || y > 14 {
-                // Top and bottom: draw pixels
-                for x in 8..=10 {
-                    binary[(y * width + x) as usize] = 255;
-                }
-            }
-            // Middle rows (5-14): no pixels → gap
-        }
-        assert!(is_separator(&binary, width, height, 8, 10));
-    }
-
-    #[test]
-    fn test_is_separator_filled_column() {
-        // Narrow column fully filled → not a separator (no gap)
-        let width = 20u32;
-        let height = 20u32;
-        let mut binary = vec![0u8; (width * height) as usize];
-        for y in 0..height {
-            for x in 8..=10 {
-                binary[(y * width + x) as usize] = 255;
-            }
-        }
-        assert!(!is_separator(&binary, width, height, 8, 10));
-    }
-
-    #[test]
-    fn test_is_separator_too_wide() {
-        // Wide segment → not a separator regardless of content
-        let width = 40u32;
-        let height = 20u32;
-        let binary = vec![0u8; (width * height) as usize];
-        assert!(!is_separator(&binary, width, height, 0, 19));
-    }
-
-    #[test]
-    fn test_recognize_digit_too_narrow() {
-        // Segment width < 3 → returns (0, 0.0)
-        let binary = vec![0u8; 100];
-        let (digit, conf) = recognize_digit(&binary, 10, 10, 5, 6);
-        assert_eq!(digit, 0);
-        assert_eq!(conf, 0.0);
-    }
-
-    #[test]
     fn test_calculate_adaptive_threshold_empty() {
         // Empty data → fallback 80
         let threshold = calculate_adaptive_threshold(&[], 0, 0);
@@ -957,78 +962,13 @@ mod tests {
             "High-contrast timer text should produce threshold >= 150, got {}", threshold);
     }
 
-    fn analyze_digit_features(
-        binary: &[u8],
-        width: u32,
-        height: u32,
-        x_start: u32,
-        x_end: u32,
-    ) -> String {
-        let seg_width = x_end.saturating_sub(x_start) + 1;
-        if seg_width < 3 {
-            return format!("Too narrow: {}", seg_width);
-        }
-
-        let mut total_pixels = 0u32;
-        let mut top_half = 0u32;
-        let mut _bottom_half = 0u32;
-        let mut left_half = 0u32;
-        let mut _right_half = 0u32;
-        let mut center_col = 0u32;
-        let mid_y = height / 2;
-        let mid_x = x_start + seg_width / 2;
-
-        for y in 0..height {
-            for x in x_start..=x_end.min(width - 1) {
-                let idx = (y * width + x) as usize;
-                if idx < binary.len() && binary[idx] > 0 {
-                    total_pixels += 1;
-                    if y < mid_y {
-                        top_half += 1;
-                    } else {
-                        _bottom_half += 1;
-                    }
-                    if x < mid_x {
-                        left_half += 1;
-                    } else {
-                        _right_half += 1;
-                    }
-
-                    let seg_center = x_start + seg_width / 2;
-                    if x >= seg_center.saturating_sub(2) && x <= seg_center + 2 {
-                        center_col += 1;
-                    }
-                }
-            }
-        }
-
-        if total_pixels == 0 {
-            return "Empty".to_string();
-        }
-
-        let top_ratio = top_half as f32 / total_pixels as f32;
-        let left_ratio = left_half as f32 / total_pixels as f32;
-        let center_ratio = center_col as f32 / total_pixels as f32;
-        let density = total_pixels as f32 / (seg_width * height) as f32;
-
-        format!(
-            "W:{} Dens:{:.2} Top:{:.2} Left:{:.2} Cent:{:.2}",
-            seg_width, density, top_ratio, left_ratio, center_ratio
-        )
-    }
-
     #[test]
     fn test_binary_ocr_accuracy() {
         use std::path::PathBuf;
 
-        // Ensure stderr output is visible
-        eprintln!("DEBUG: Starting test_binary_ocr_accuracy");
-
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let fixtures_dir =
             PathBuf::from(manifest_dir).join("tests/fixtures/countdown_monitor/active");
-
-        eprintln!("DEBUG: Loading test images from {:?}", fixtures_dir);
 
         let paths = match std::fs::read_dir(&fixtures_dir) {
             Ok(p) => p,
@@ -1046,12 +986,11 @@ mod tests {
             let path = path.unwrap().path();
             let filename = path.file_name().unwrap().to_str().unwrap().to_string();
 
-            if !filename.starts_with("binary_") || !filename.ends_with(".png") {
+            if !filename.ends_with(".png") {
                 continue;
             }
 
-            // Expected format: binary_MM-SS-mmm.png or binary_failed_MM-SS-mmm.png
-            // Parse expected values
+            // Expected format: MM-SS-mmm.png (or legacy binary_MM-SS-mmm.png)
             let content = filename
                 .replace("binary_", "")
                 .replace("failed_", "")
@@ -1085,47 +1024,18 @@ mod tests {
                     if matches {
                         passed += 1;
                     } else {
-                        // Detailed analysis for failure
-                        let segments = find_character_columns(&binary, width, height);
-                        let mut debug_info = String::new();
-                        for (i, (s, e)) in segments.iter().enumerate() {
-                            let feat = analyze_digit_features(&binary, width, height, *s, *e);
-                            let (digit, conf) = recognize_digit(&binary, width, height, *s, *e);
-                            debug_info.push_str(&format!(
-                                "\n    Seg{}: [{}] ({:.2}) -> {}",
-                                i, digit, conf, feat
-                            ));
-                        }
-
                         failures.push(format!(
-                            "{}: Expected {:02}:{:02}.{:03}, Got {:02}:{:02}.{:03}{}",
+                            "{}: Expected {:02}:{:02}.{:03}, Got {:02}:{:02}.{:03}",
                             filename,
-                            exp_min,
-                            exp_sec,
-                            exp_ms,
-                            timer.minutes,
-                            timer.seconds,
-                            timer.milliseconds,
-                            debug_info
+                            exp_min, exp_sec, exp_ms,
+                            timer.minutes, timer.seconds, timer.milliseconds
                         ));
                     }
                 }
                 None => {
-                    // Also dump features for None result
-                    let segments = find_character_columns(&binary, width, height);
-                    let mut debug_info = String::new();
-                    for (i, (s, e)) in segments.iter().enumerate() {
-                        let feat = analyze_digit_features(&binary, width, height, *s, *e);
-                        let (digit, conf) = recognize_digit(&binary, width, height, *s, *e);
-                        debug_info.push_str(&format!(
-                            "\n    Seg{}: [{}] ({:.2}) -> {}",
-                            i, digit, conf, feat
-                        ));
-                    }
-
                     failures.push(format!(
-                        "{}: Failed to recognize (None){}",
-                        filename, debug_info
+                        "{}: Failed to recognize (None)",
+                        filename
                     ));
                 }
             }
@@ -1147,111 +1057,6 @@ mod tests {
             }
             panic!("OCR accuracy test failed: {}/{} failed", failures.len(), total);
         }
-    }
-    #[test]
-    fn test_parse_timer_digits_7_digits() {
-        // 7 digits: [0, M, SS, mmm] → 0 3 4 1 9 3 3
-        // len=7, so s1_idx=3, s10_idx=2, minutes from idx 1
-        let result = parse_timer_digits(&[0, 3, 4, 1, 9, 3, 3]);
-        assert_eq!(result, Some((3, 41, 933)));
-    }
-
-    #[test]
-    fn test_parse_timer_digits_5_digits_minimum() {
-        // 5 digits: [SS, mmm] → 4 1 9 3 3
-        // len=5, so s1_idx=1, s10_idx=0, no minutes (len<7)
-        let result = parse_timer_digits(&[4, 1, 9, 3, 3]);
-        assert_eq!(result, Some((0, 41, 933)));
-    }
-
-    #[test]
-    fn test_parse_timer_digits_6_digits() {
-        // 6 digits: len<7, no minutes
-        // s1_idx=2, s10_idx=1
-        let result = parse_timer_digits(&[3, 4, 1, 9, 3, 3]);
-        assert_eq!(result, Some((0, 41, 933)));
-    }
-
-    #[test]
-    fn test_parse_timer_digits_8_digits_separator_skip() {
-        // 8 digits: separator skip kicks in (len>=8)
-        // s1_idx=3, s10_idx=2 (same formula but different branch)
-        // minutes: len>=7, len<9 so m_idx = s10_idx - 1 = 1
-        let result = parse_timer_digits(&[0, 3, 4, 1, 9, 3, 3, 0]);
-        // ms: last 3 = [3, 3, 0] = 330 → snap to 333
-        // seconds: s10_idx=2 → 4, s1_idx=3 → 1, seconds=41
-        // minutes: idx 1 → 3
-        assert_eq!(result, Some((3, 41, 333)));
-    }
-
-    #[test]
-    fn test_parse_timer_digits_too_few() {
-        assert_eq!(parse_timer_digits(&[1, 2, 3, 4]), None);
-        assert_eq!(parse_timer_digits(&[1, 2, 3]), None);
-        assert_eq!(parse_timer_digits(&[]), None);
-    }
-
-    #[test]
-    fn test_parse_timer_digits_seconds_overflow() {
-        // seconds >= 60 → None
-        // 5 digits: s10_idx=0, s1_idx=1
-        // seconds = digits[0]*10 + digits[1] = 6*10 + 1 = 61 → None
-        let result = parse_timer_digits(&[6, 1, 0, 0, 0]);
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn test_parse_timer_digits_ms_snapping() {
-        // ms=934 should snap to 933
-        let result = parse_timer_digits(&[0, 3, 4, 1, 9, 3, 4]);
-        assert_eq!(result, Some((3, 41, 933)));
-
-        // ms=700 should stay 700
-        let result = parse_timer_digits(&[5, 4, 7, 0, 0]);
-        assert_eq!(result, Some((0, 54, 700)));
-
-        // ms=467 → already valid (X67 pattern), stays 467
-        let result = parse_timer_digits(&[0, 0, 4, 6, 7]);
-        assert_eq!(result, Some((0, 0, 467)));
-    }
-
-    #[test]
-    fn test_parse_timer_digits_boundary_minutes() {
-        // minutes=9: valid (single digit max)
-        // 7 digits: [0, M, SS, mmm] → idx layout: 0=leading, 1=minutes, 2-3=seconds, 4-6=ms
-        let result = parse_timer_digits(&[0, 9, 5, 9, 9, 3, 3]);
-        assert_eq!(result, Some((9, 59, 933)));
-
-        // minutes=10: invalid (two-digit minutes)
-        // Can't happen via recognize_digit (returns 0-9), but parse_timer_digits must reject it
-        let result = parse_timer_digits(&[0, 10, 5, 9, 9, 3, 3]);
-        assert_eq!(result, None, "Two-digit minutes should be rejected");
-    }
-
-    #[test]
-    fn test_parse_timer_digits_boundary_seconds() {
-        // seconds=59: valid
-        let result = parse_timer_digits(&[5, 9, 0, 0, 0]);
-        assert_eq!(result, Some((0, 59, 0)));
-
-        // seconds=60: invalid
-        let result = parse_timer_digits(&[6, 0, 0, 0, 0]);
-        assert_eq!(result, None, "seconds=60 should be rejected");
-    }
-
-    #[test]
-    fn test_parse_timer_digits_boundary_ms() {
-        // ms last two digits = 00: valid (X00 pattern)
-        let result = parse_timer_digits(&[3, 0, 1, 0, 0]);
-        assert_eq!(result, Some((0, 30, 100)));
-
-        // ms last two digits = 33: valid (X33 pattern)
-        let result = parse_timer_digits(&[3, 0, 1, 3, 3]);
-        assert_eq!(result, Some((0, 30, 133)));
-
-        // ms last two digits = 67: valid (X67 pattern)
-        let result = parse_timer_digits(&[3, 0, 1, 6, 7]);
-        assert_eq!(result, Some((0, 30, 167)));
     }
 
     #[test]
@@ -1283,15 +1088,15 @@ mod tests {
             let path = path.unwrap().path();
             let filename = path.file_name().unwrap().to_str().unwrap().to_string();
 
-            if !filename.starts_with("binary_") || !filename.ends_with(".png") {
+            if !filename.ends_with(".png") {
                 continue;
             }
 
-            // Filename format: binary_MM-SS-mmm.png
-            // e.g. binary_03-41-933.png -> "03:41.933" (9 chars)
+            // Filename format: MM-SS-mmm.png (or legacy binary_MM-SS-mmm.png)
+            // e.g. 03-41-933.png -> "03:41.933" (9 chars)
             let content = filename
                 .replace("binary_", "")
-                .replace("failed_", "") // Handle failed ones too if they have correct labels now
+                .replace("failed_", "")
                 .replace(".png", "");
             let parts: Vec<&str> = content.split('-').collect();
 
@@ -1400,10 +1205,182 @@ mod tests {
         eprintln!("DEBUG: Templates extracted.");
     }
 
+    /// Load a grayscale PNG template from file path, return GrayImage
+    #[allow(dead_code)] // Used by ignored tool tests
+    fn load_gray_template(path: &std::path::Path) -> GrayImage {
+        image::open(path).expect("Failed to load template").to_luma8()
+    }
+
+    #[test]
+    #[ignore] // Diagnostic tool — dumps column density and segmentation for a specific image
+    fn test_diagnose_segmentation() {
+        use std::path::PathBuf;
+
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let target = PathBuf::from(manifest_dir)
+            .join("tests/fixtures/countdown_monitor/min-active/03-45-100.png");
+
+        let rgb_img = image::open(&target).expect("Failed to open").to_rgb8();
+        let width = rgb_img.width();
+        let height = rgb_img.height();
+        let rgb_data = rgb_img.into_raw();
+
+        eprintln!("Image size: {}x{}", width, height);
+
+        let binary = binarize_for_ocr(&rgb_data, width, height);
+        let threshold = (height as f32 * COLUMN_THRESHOLD_RATIO) as u32;
+        eprintln!("Column threshold: {} (height={}, ratio={})", threshold, height, COLUMN_THRESHOLD_RATIO);
+
+        // Dump column densities
+        eprintln!("\nColumn density (white pixel count per column):");
+        let mut density_line = String::new();
+        for x in 0..width {
+            let mut col_sum = 0u32;
+            for y in 0..height {
+                if binary[(y * width + x) as usize] > 0 {
+                    col_sum += 1;
+                }
+            }
+            density_line.push_str(&format!("{:2} ", col_sum));
+        }
+        eprintln!("{}", density_line);
+
+        // Show threshold bar
+        let mut thresh_line = String::new();
+        for x in 0..width {
+            let mut col_sum = 0u32;
+            for y in 0..height {
+                if binary[(y * width + x) as usize] > 0 {
+                    col_sum += 1;
+                }
+            }
+            thresh_line.push_str(if col_sum > threshold { " # " } else { " . " });
+        }
+        eprintln!("{}", thresh_line);
+
+        let segments = find_character_columns(&binary, width, height);
+        eprintln!("\nSegments ({}): {:?}", segments.len(), segments);
+
+        // Save binarized image for visual inspection
+        let output_dir = PathBuf::from(manifest_dir)
+            .parent()
+            .unwrap()
+            .join("output");
+        let _ = std::fs::create_dir_all(&output_dir);
+        image::save_buffer(
+            output_dir.join("diag_03-45-100_binary.png"),
+            &binary,
+            width,
+            height,
+            image::ColorType::L8,
+        )
+        .unwrap();
+        eprintln!("Saved binarized image to output/diag_03-45-100_binary.png");
+    }
+
+    #[test]
+    #[ignore] // Segment extraction tool — writes digit images to output/min-digits/
+    fn test_extract_min_segments() {
+        use std::path::PathBuf;
+
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let fixtures_dir =
+            PathBuf::from(manifest_dir).join("tests/fixtures/countdown_monitor/min-active");
+        let output_dir = PathBuf::from(manifest_dir)
+            .parent()
+            .unwrap()
+            .join("output/min-digits");
+        let _ = std::fs::create_dir_all(&output_dir);
+
+        let paths = match std::fs::read_dir(&fixtures_dir) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("Skipping: fixtures directory not found: {}", e);
+                return;
+            }
+        };
+
+        let mut counts = [0u32; 12]; // 0-9, 10=colon, 11=dot
+
+        for path in paths {
+            let path = path.unwrap().path();
+            let filename = path.file_name().unwrap().to_str().unwrap().to_string();
+
+            if !filename.ends_with(".png") {
+                continue;
+            }
+
+            let content = filename.replace(".png", "");
+            let parts: Vec<&str> = content.split('-').collect();
+            if parts.len() != 3 {
+                continue;
+            }
+
+            // Construct expected character sequence: "03:49.733"
+            let expected_chars = format!("{}:{}.{}", parts[0], parts[1], parts[2]);
+
+            // Load RGB image, binarize, segment
+            let rgb_img = image::open(&path).expect("Failed to open image").to_rgb8();
+            let width = rgb_img.width();
+            let height = rgb_img.height();
+            let rgb_data = rgb_img.into_raw();
+
+            let binary = binarize_for_ocr(&rgb_data, width, height);
+            let segments = find_character_columns(&binary, width, height);
+
+            if segments.len() != expected_chars.len() {
+                eprintln!(
+                    "SKIP {}: expected {} segments, got {}",
+                    filename,
+                    expected_chars.len(),
+                    segments.len()
+                );
+                continue;
+            }
+
+            for (i, (start, end)) in segments.iter().enumerate() {
+                let ch = expected_chars.chars().nth(i).unwrap();
+
+                let (label, idx) = match ch {
+                    '0'..='9' => (format!("{}", ch), ch.to_digit(10).unwrap() as usize),
+                    ':' => ("colon".to_string(), 10),
+                    '.' => ("dot".to_string(), 11),
+                    _ => continue,
+                };
+
+                counts[idx] += 1;
+                let seg_width = end - start + 1;
+
+                // Extract segment
+                let mut seg_buf = Vec::with_capacity((seg_width * height) as usize);
+                for y in 0..height {
+                    for x in *start..=*end {
+                        let pixel_idx = (y * width + x) as usize;
+                        seg_buf.push(if pixel_idx < binary.len() { binary[pixel_idx] } else { 0 });
+                    }
+                }
+
+                let out_name = format!(
+                    "{}_sample{}_{}.png",
+                    label, counts[idx], content
+                );
+                image::save_buffer(
+                    output_dir.join(&out_name),
+                    &seg_buf,
+                    seg_width,
+                    height,
+                    image::ColorType::L8,
+                )
+                .unwrap_or_else(|e| eprintln!("Failed to save {}: {}", out_name, e));
+            }
+        }
+
+        eprintln!("Extraction complete. Counts (0-9, colon, dot): {:?}", counts);
+        eprintln!("Output: output/min-digits/");
+    }
+
     #[test]
     fn test_min_ocr_pipeline() {
-        // At minimum resolution (640x360), Timer OCR has limited success.
-        // Timer ROI is only ~50px wide, too small for reliable template matching.
         let battle_images = [
             "min-battle-active.png",
             "min-battle-pause.png",
@@ -1423,5 +1400,126 @@ mod tests {
             }
         }
         println!("Timer OCR at min resolution: {}/3 succeeded", success);
+    }
+
+    /// Unified OCR pipeline test: tests BOTH normal and min images through recognize_timer_from_binary.
+    #[test]
+    fn test_unified_ocr_pipeline() {
+        use std::path::PathBuf;
+
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+
+        // ===== Test normal resolution (active/) =====
+        eprintln!("=== Normal Resolution (active/) ===");
+        let active_dir = PathBuf::from(manifest_dir).join("tests/fixtures/countdown_monitor/active");
+        let mut norm_total = 0;
+        let mut norm_passed = 0;
+        let mut norm_failures: Vec<String> = Vec::new();
+
+        if let Ok(paths) = std::fs::read_dir(&active_dir) {
+            let mut sorted: Vec<_> = paths.filter_map(|p| p.ok()).collect();
+            sorted.sort_by_key(|p| p.file_name());
+
+            for entry in sorted {
+                let path = entry.path();
+                let filename = path.file_name().unwrap().to_str().unwrap().to_string();
+                if !filename.ends_with(".png") { continue; }
+
+                let content = filename.replace("binary_", "").replace("failed_", "").replace(".png", "");
+                let parts: Vec<&str> = content.split('-').collect();
+                if parts.len() != 3 { continue; }
+
+                norm_total += 1;
+                let exp_min: u8 = parts[0].parse().unwrap_or(0);
+                let exp_sec: u8 = parts[1].parse().unwrap_or(0);
+                let exp_ms: u16 = parts[2].parse().unwrap_or(0);
+
+                let img = image::open(&path).expect("open").to_luma8();
+                let w = img.width(); let h = img.height();
+                let binary = img.into_vec();
+
+                match recognize_timer_from_binary(&binary, w, h) {
+                    Some(timer) => {
+                        if timer.minutes == exp_min && timer.seconds == exp_sec && timer.milliseconds == exp_ms {
+                            norm_passed += 1;
+                        } else {
+                            norm_failures.push(format!(
+                                "{}: exp {:02}:{:02}.{:03}, got {}",
+                                filename, exp_min, exp_sec, exp_ms, timer.to_string()));
+                        }
+                    }
+                    None => {
+                        norm_failures.push(format!("{}: recognition returned None", filename));
+                    }
+                }
+            }
+        }
+
+        eprintln!("Normal: {}/{} passed", norm_passed, norm_total);
+        for f in &norm_failures { eprintln!("  FAIL: {}", f); }
+
+        // ===== Test min resolution (min-active/) =====
+        eprintln!("\n=== Min Resolution (min-active/) ===");
+        let min_dir = PathBuf::from(manifest_dir).join("tests/fixtures/countdown_monitor/min-active");
+        let mut min_total = 0;
+        let mut min_passed = 0;
+        let mut min_seg_fails = 0;
+        let mut min_rec_failures: Vec<String> = Vec::new();
+
+        if let Ok(paths) = std::fs::read_dir(&min_dir) {
+            let mut sorted: Vec<_> = paths.filter_map(|p| p.ok()).collect();
+            sorted.sort_by_key(|p| p.file_name());
+
+            for entry in sorted {
+                let path = entry.path();
+                let filename = path.file_name().unwrap().to_str().unwrap().to_string();
+                if !filename.ends_with(".png") { continue; }
+
+                let content = filename.replace(".png", "");
+                let parts: Vec<&str> = content.split('-').collect();
+                if parts.len() != 3 { continue; }
+
+                min_total += 1;
+                let exp_min: u8 = parts[0].parse().unwrap_or(0);
+                let exp_sec: u8 = parts[1].parse().unwrap_or(0);
+                let exp_ms: u16 = parts[2].parse().unwrap_or(0);
+
+                let rgb_img = image::open(&path).expect("open").to_rgb8();
+                let w = rgb_img.width(); let h = rgb_img.height();
+                let binary = binarize_for_ocr(&rgb_img.into_raw(), w, h);
+
+                match recognize_timer_from_binary(&binary, w, h) {
+                    Some(timer) => {
+                        if timer.minutes == exp_min && timer.seconds == exp_sec && timer.milliseconds == exp_ms {
+                            min_passed += 1;
+                        } else {
+                            min_rec_failures.push(format!(
+                                "{}: exp {:02}:{:02}.{:03}, got {}",
+                                filename, exp_min, exp_sec, exp_ms, timer.to_string()));
+                        }
+                    }
+                    None => {
+                        min_seg_fails += 1;
+                        eprintln!("  [{}] segmentation/field mismatch → skipped", filename);
+                    }
+                }
+            }
+        }
+
+        let min_recognized = min_total - min_seg_fails;
+        eprintln!("\nMin: {}/{} recognized, {}/{} passed",
+            min_recognized, min_total, min_passed, min_recognized);
+        for f in &min_rec_failures { eprintln!("  FAIL: {}", f); }
+
+        eprintln!("\n=== Summary ===");
+        eprintln!("Normal: {}/{} (recognition accuracy)", norm_passed, norm_total);
+        eprintln!("Min: segmentation {}/{}, recognition {}/{}",
+            min_recognized, min_total, min_passed, min_recognized);
+
+        // Assert: normal resolution must be perfect, min recognition must be perfect
+        assert_eq!(norm_failures.len(), 0,
+            "Normal resolution failures: {:?}", norm_failures);
+        assert_eq!(min_rec_failures.len(), 0,
+            "Min resolution recognition failures: {:?}", min_rec_failures);
     }
 }

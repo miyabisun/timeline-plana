@@ -130,7 +130,7 @@
         </div>
         <div class="flex items-center justify-between">
           <div>
-            <p class="text-sm font-medium">Save Cost ROI</p>
+            <p class="text-sm font-medium">Cost ROI</p>
             <p class="text-xs text-slate-400 dark:text-slate-500">
               Save skew-corrected cost gauge image to output/
             </p>

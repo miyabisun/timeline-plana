@@ -163,39 +163,7 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                     .unwrap()
                     .join("output");
 
-                // 1. Check for Screenshot Request
-                {
-                    let mut should_screenshot = debug_state.should_screenshot.lock().unwrap();
-                    if *should_screenshot {
-                        *should_screenshot = false;
-                        println!("Visual Intercept: Screenshot requested!");
-                        let _ = std::fs::create_dir_all(&debug_output_dir);
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap();
-                        let secs = now.as_secs();
-                        let millis = now.subsec_millis();
-                        let h = (secs / 3600) % 24;
-                        let m = (secs / 60) % 60;
-                        let s = secs % 60;
-                        let path = debug_output_dir.join(format!(
-                            "debug_screenshot_{:02}{:02}{:02}_{:03}.png",
-                            h, m, s, millis
-                        ));
-                        if let Some(img_buffer) =
-                            image::ImageBuffer::<image::Rgb<u8>, Vec<u8>>::from_raw(
-                                width,
-                                height,
-                                rgb_data.clone(),
-                            )
-                        {
-                            let _ = img_buffer.save(&path);
-                            println!("Screenshot saved to {:?}", path);
-                        }
-                    }
-                }
-
-                // 2. Check for Binary Debug Request
+                // 1. Check for Binary Debug Request
                 {
                     let mut save_binary = debug_state.should_save_binary.lock().unwrap();
                     if *save_binary {
@@ -324,10 +292,9 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                 if logic_state.current_battle_state != BattleState::Inactive {
                     // Timer Extraction
                     // We must SUB-CROP the Timer part to pass to countdown_monitor
-                    // Capture is 85-100% (Width = 15%)
-                    // Timer is 85-93% (Width = 8%)
-                    // Timer width relative to capture width: 8/15
-                    let timer_cols = (width as f32 * (0.08 / 0.15)) as u32;
+                    // Capture is 85.49%-100% (Width = 14.51%)
+                    // Timer is 85.49%-93.52% (Width = 8.03%)
+                    let timer_cols = (width as f32 * (0.0803 / 0.1451)) as u32;
                     let timer_cols = timer_cols.min(width); // Safety cap
 
                     // Extract logic (copying to new buffer for OCR API)
@@ -591,10 +558,74 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                     }
                 }
 
+                // Timer ROI screenshot: extract timer region directly from current frame
+                {
+                    let mut flag = self.debug_state.should_screenshot.lock().unwrap();
+                    if *flag {
+                        *flag = false;
+                        let debug_output_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                            .parent()
+                            .unwrap()
+                            .join("output");
+                        let _ = std::fs::create_dir_all(&debug_output_dir);
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap();
+                        let secs = now.as_secs();
+                        let millis = now.subsec_millis();
+                        let h = (secs / 3600) % 24;
+                        let m = (secs / 60) % 60;
+                        let s = secs % 60;
+                        let path = debug_output_dir.join(format!(
+                            "timer_roi_{:02}{:02}{:02}_{:03}.png",
+                            h, m, s, millis
+                        ));
+                        // Extract timer ROI (85.49%-93.52%, 3.60%-6.51%) from work_data
+                        let tx_start = (content_width as f32 * 0.8549) as u32;
+                        let tx_end = (content_width as f32 * 0.9352) as u32;
+                        let ty_start = (content_height as f32 * 0.0360) as u32;
+                        let ty_end = (content_height as f32 * 0.0651) as u32;
+                        let tw = tx_end.saturating_sub(tx_start);
+                        let th = ty_end.saturating_sub(ty_start);
+                        if tw > 0 && th > 0 {
+                            let mut timer_rgb = Vec::with_capacity((tw * th * 3) as usize);
+                            for y in ty_start..ty_end {
+                                let row_start = (y * work_width + tx_start) as usize * 4;
+                                let row_end = (y * work_width + tx_end) as usize * 4;
+                                if row_end <= work_data.len() {
+                                    for chunk in work_data[row_start..row_end].chunks_exact(4) {
+                                        timer_rgb.extend_from_slice(&chunk[0..3]);
+                                    }
+                                }
+                            }
+                            // Apply normalize + skew correction
+                            let (norm, norm_w, norm_h) =
+                                crate::core::countdown_monitor::normalize_roi(
+                                    &timer_rgb, tw, th,
+                                );
+                            let (skewed, skew_w, skew_h) =
+                                crate::core::countdown_monitor::apply_skew_correction(
+                                    &norm,
+                                    norm_w,
+                                    norm_h,
+                                    crate::core::countdown_monitor::SKEW_FACTOR,
+                                );
+                            if let Some(img) =
+                                image::ImageBuffer::<image::Rgb<u8>, Vec<u8>>::from_raw(
+                                    skew_w, skew_h, skewed,
+                                )
+                            {
+                                let _ = img.save(&path);
+                                println!("Timer ROI saved to {:?}", path);
+                            }
+                        }
+                    }
+                }
+
                 // OPTIMIZATION: Copy Header Strip (Timer + Pause Button)
-                // Timer ROI: x 85.39%-100%, y 3.60%-6.51%
+                // Timer ROI: x 85.49%-100%, y 3.60%-6.51%
                 // ROI percentages are content-relative (excluding black bars)
-                let roi_x_start = (content_width as f32 * 0.8539) as u32;
+                let roi_x_start = (content_width as f32 * 0.8549) as u32;
                 let roi_x_end = content_width; // 100% of content
                 let roi_y_start = (content_height as f32 * 0.0360) as u32;
                 let roi_y_end = (content_height as f32 * 0.0651) as u32;
@@ -603,12 +634,11 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                 let roi_height = roi_y_end.saturating_sub(roi_y_start);
 
                 // Cost Gauge ROI (content-relative)
-                // Original pixels at 3416x1993: x=2186..3040, y=1813..1857
-                // Content-relative at 3400x1921:
-                let cost_x_start = (content_width as f32 * 0.6429) as u32;
-                let cost_x_end = (content_width as f32 * 0.8941) as u32;
-                let cost_y_start = (content_height as f32 * 0.9438) as u32;
-                let cost_y_end = (content_height as f32 * 0.9667) as u32;
+                // Content-relative: x=64.49%..89.61%, y=94.68%..96.97%
+                let cost_x_start = (content_width as f32 * 0.6449) as u32;
+                let cost_x_end = (content_width as f32 * 0.8961) as u32;
+                let cost_y_start = (content_height as f32 * 0.9468) as u32;
+                let cost_y_end = (content_height as f32 * 0.9697) as u32;
 
                 let cost_roi_width = cost_x_end.saturating_sub(cost_x_start);
                 let cost_roi_height = cost_y_end.saturating_sub(cost_y_start);
