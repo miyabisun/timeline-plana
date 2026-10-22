@@ -1,0 +1,36 @@
+#!/bin/sh
+# The gate before main or a release tag reaches GitHub: every check must pass
+# (npm run verify: the frontend build and its type check, rustfmt, clippy and the
+# Rust tests); nothing else tests.
+# Other branches are pushed without checks. Enable once per clone:
+#   git config core.hooksPath .githooks
+
+zero=0000000000000000000000000000000000000000
+pushed=
+while read -r _local_ref local_sha remote_ref _remote_sha; do
+  case "$remote_ref" in
+    refs/heads/main | refs/tags/v*)
+      if [ "$local_sha" != "$zero" ]; then
+        # Anything unexpected refuses the push rather than skipping the checks.
+        pushed=$(git rev-parse "$local_sha^{commit}") || exit 1
+      fi
+      ;;
+  esac
+done
+[ -z "$pushed" ] && exit 0
+
+# A release tag pushed right after its commit passed need not run the checks again.
+mark="$(git rev-parse --git-common-dir)/verified-commit" || exit 1
+[ "$pushed" = "$(cat "$mark" 2>/dev/null)" ] && exit 0
+
+# The checks run on the working tree, so it has to be exactly what is pushed.
+if [ "$(git rev-parse HEAD)" != "$pushed" ] || [ -n "$(git status --porcelain)" ]; then
+  echo "pre-push: check out $pushed with a clean working tree so it can be verified" >&2
+  exit 1
+fi
+if ! command -v npm >/dev/null 2>&1; then
+  echo "pre-push: npm is not on PATH; install Node.js 24 to run the checks" >&2
+  exit 1
+fi
+npm run verify || exit 1
+echo "$pushed" >"$mark"
