@@ -1,0 +1,39 @@
+{
+  "due": true,
+  "mark": {
+    "ms": 205000,
+    "note": "コタマNS ボス攻撃力デバフ発動",
+    "row": 3,
+    "soon": true,
+    "time": "3:25"
+  },
+  "next": 1,
+  "skills": [
+    {
+      "done": true,
+      "note": "開幕バフ",
+      "row": 0,
+      "skill": "コタマ",
+      "target": null
+    },
+    {
+      "done": false,
+      "note": "バフ重ねがけ",
+      "row": 1,
+      "skill": "ホシノ",
+      "target": null
+    },
+    {
+      "done": false,
+      "note": "EXで攻撃",
+      "row": 2,
+      "skill": "シロコ",
+      "target": null
+    }
+  ],
+  "trigger": {
+    "kind": "at",
+    "ms": 210000,
+    "text": "3:30"
+  }
+}

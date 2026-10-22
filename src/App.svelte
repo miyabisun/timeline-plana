@@ -6,7 +6,7 @@
   import { Activity, Bug, Settings, LayoutDashboard } from "lucide-svelte";
   import { listen } from '@tauri-apps/api/event';
   import { createOverlay, destroyOverlay } from './lib/overlay';
-  import type { ProcessCandidate, ShittimPayload, Theme, TabId } from './types';
+  import type { Plan, ProcessCandidate, ShittimPayload, Theme, TabId } from './types';
   import { onDestroy } from "svelte";
   import "./App.css";
 
@@ -18,6 +18,8 @@
   // Global State for Shittim Link
   let shittimData = $state<ShittimPayload | null>(null);
   let targetInfo = $state<ProcessCandidate | null>(null);
+  // The loaded timeline (kept while other tabs are open)
+  let plan = $state<Plan | null>(null);
 
   // Overlay state
   let overlayActive = $state(false);
@@ -144,7 +146,12 @@
         />
       </div>
     {:else if activeTab === "timeline"}
-      <TimelinePanel />
+      <TimelinePanel
+        bind:plan
+        {shittimData}
+        {overlayActive}
+        onToggleOverlay={toggleOverlay}
+      />
     {:else if activeTab === "debug"}
       <div class="p-4 h-full">
         <DebugPanel

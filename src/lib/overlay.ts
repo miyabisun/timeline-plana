@@ -19,8 +19,8 @@ export async function createOverlay(
   const logicalY = windowGeometry.y / scale;
   const logicalW = windowGeometry.width / scale;
   const logicalH = windowGeometry.height / scale;
-  const overlayWidth = 140;
-  const overlayHeight = 120;
+  const overlayWidth = 180;
+  const overlayHeight = 280;
   const x = Math.round(logicalX + logicalW - overlayWidth);
   const y = Math.round(logicalY + logicalH / 2 - overlayHeight / 2);
 

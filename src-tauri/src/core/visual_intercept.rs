@@ -1,6 +1,8 @@
 use crate::core::combat_intel::BattleState;
+use crate::core::shittim_link::{sync_to_chest, ShittimPayload, WindowGeometry};
+use crate::core::tactical_guidance::Observation;
 
-use crate::state::DebugState;
+use crate::state::{DebugState, GuideState};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -373,18 +375,39 @@ fn run_worker(
         // Read latest stats from producer
         let current_stats = stats.lock().unwrap_or_else(PoisonError::into_inner).clone();
 
-        crate::core::shittim_link::sync_to_chest(
+        // Follow the loaded timeline with what this frame shows.
+        let frame = Observation {
+            time_ms: current_timer
+                .as_ref()
+                .map(crate::core::countdown_monitor::TimerValue::to_millis),
+            cost: current_cost.as_ref().map(|cost| cost.current),
+            state: logic_state.current_battle_state,
+        };
+        let guidance = app_handle
+            .state::<GuideState>()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_mut()
+            .map(|guide| {
+                guide.observe(&frame);
+                guide.guidance(&frame)
+            });
+
+        sync_to_chest(
             app_handle,
-            &format!("{:?}", logic_state.current_battle_state),
-            current_timer,
-            current_cost,
-            60.0, // Game window capture rate (WGC 60 FPS)
-            current_stats,
-            crate::core::shittim_link::WindowGeometry {
-                x: payload.client_x,
-                y: payload.client_y,
-                width: payload.client_width,
-                height: payload.client_height,
+            &ShittimPayload {
+                battle_state: format!("{:?}", logic_state.current_battle_state),
+                fps: 60.0, // Game window capture rate (WGC 60 FPS)
+                stats: current_stats,
+                timer: current_timer,
+                cost: current_cost,
+                window: WindowGeometry {
+                    x: payload.client_x,
+                    y: payload.client_y,
+                    width: payload.client_width,
+                    height: payload.client_height,
+                },
+                guidance,
             },
         );
     }

@@ -3,7 +3,7 @@ pub mod commands;
 pub mod core;
 pub mod state;
 
-use crate::state::DebugState;
+use crate::state::{DebugState, GuideState};
 use std::sync::Arc;
 use tauri::Manager;
 
@@ -17,11 +17,13 @@ pub fn run() {
 
             let interceptor_manager = core::visual_intercept::InterceptorManager::new();
             app.manage(interceptor_manager);
+            app.manage(GuideState::default());
 
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            commands::timeline::greet,
+            commands::timeline::load_timeline,
+            commands::timeline::select_timeline_row,
             commands::target::list_potential_targets,
             commands::intercept::start_intercept_demo,
             commands::debug::trigger_screenshot,

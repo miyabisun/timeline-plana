@@ -1,0 +1,84 @@
+{
+  "boss": "ホド",
+  "difficulty": "INSANE",
+  "rows": [
+    {
+      "kind": "skill",
+      "note": "開幕バフ",
+      "skill": "コタマ",
+      "target": null,
+      "trigger": {
+        "kind": "at",
+        "ms": 210000,
+        "text": "3:30"
+      }
+    },
+    {
+      "kind": "skill",
+      "note": "バフ重ねがけ",
+      "skill": "ホシノ",
+      "target": null,
+      "trigger": null
+    },
+    {
+      "kind": "skill",
+      "note": "EXで攻撃",
+      "skill": "シロコ",
+      "target": null,
+      "trigger": null
+    },
+    {
+      "kind": "mark",
+      "ms": 205000,
+      "note": "コタマNS ボス攻撃力デバフ発動",
+      "time": "3:25"
+    },
+    {
+      "kind": "skill",
+      "note": "2回目バフ",
+      "skill": "コタマ",
+      "target": null,
+      "trigger": {
+        "cost": 7.1,
+        "kind": "cost"
+      }
+    },
+    {
+      "kind": "skill",
+      "note": null,
+      "skill": "ホシノ",
+      "target": null,
+      "trigger": null
+    },
+    {
+      "kind": "skill",
+      "note": null,
+      "skill": "シロコ",
+      "target": null,
+      "trigger": null
+    },
+    {
+      "kind": "mark",
+      "ms": 90000,
+      "note": "ボス防御力ダウンフェーズ",
+      "time": "1:30"
+    },
+    {
+      "kind": "skill",
+      "note": "回復",
+      "skill": "セリナ",
+      "target": "シロコ",
+      "trigger": {
+        "kind": "at",
+        "ms": 80500,
+        "text": "1:20.500"
+      }
+    }
+  ],
+  "students": [
+    "シロコ",
+    "ホシノ",
+    "コタマ",
+    "セリナ"
+  ]
+}

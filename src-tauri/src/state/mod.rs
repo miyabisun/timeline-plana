@@ -1,5 +1,10 @@
 // App state definitions
+use crate::core::tactical_guidance::Guide;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+
+/// The timeline battles are guided through, once one is loaded.
+pub type GuideState = Mutex<Option<Guide>>;
 
 /// Debug image requests from the frontend; the capture side takes each one once.
 #[derive(Default)]

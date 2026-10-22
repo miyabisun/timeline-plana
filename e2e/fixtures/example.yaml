@@ -1,0 +1,52 @@
+boss: "ホド"
+difficulty: "INSANE"
+armor: "重装甲"
+terrain: "屋外"
+party:
+  striker:
+    - name: "シロコ"
+      lv: 90
+      star: "固有3"
+      skill: "5M7M"
+      equip: "T9/9/9"
+      wb: "25/25/0"
+    - name: "ホシノ"
+      lv: 90
+      star: "固有2"
+      skill: "5777"
+      equip: "T7/7/7"
+      wb: "25/25/0"
+  special:
+    - name: "コタマ"
+      lv: 80
+      star: "固有1"
+      skill: "2MMM"
+      equip: "T5/5/5"
+      wb: "0/0/0"
+    - name: "セリナ"
+      lv: 70
+      star: "星4"
+      skill: "3777"
+      equip: "T5/5/5"
+      wb: "0/0/0"
+timeline:
+  - when_at: "3:30"
+    skill: "コタマ"
+    note: "開幕バフ"
+  - skill: "ホシノ"
+    note: "バフ重ねがけ"
+  - skill: "シロコ"
+    note: "EXで攻撃"
+  - time: "3:25"
+    note: "コタマNS ボス攻撃力デバフ発動"
+  - when_cost: 7.1
+    skill: "コタマ"
+    note: "2回目バフ"
+  - skill: "ホシノ"
+  - skill: "シロコ"
+  - time: "1:30"
+    note: "ボス防御力ダウンフェーズ"
+  - when_at: "1:20.500"
+    skill: "セリナ"
+    target: "シロコ"
+    note: "回復"

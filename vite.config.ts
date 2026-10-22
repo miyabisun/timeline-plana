@@ -34,4 +34,13 @@ export default defineConfig(async () => ({
       "@": "/src",
     },
   },
+  // The overlay window is a page of its own.
+  build: {
+    rollupOptions: {
+      input: {
+        main: "index.html",
+        overlay: "overlay.html",
+      },
+    },
+  },
 }));

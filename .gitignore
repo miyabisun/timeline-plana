@@ -34,3 +34,7 @@ Thumbs.db
 debug/
 output/
 *.txt
+
+# Playwright
+test-results/
+playwright-report/

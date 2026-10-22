@@ -1,5 +1,6 @@
 use crate::core::countdown_monitor::TimerValue;
 use crate::core::resource_survey::CostValue;
+use crate::core::tactical_guidance::Guidance;
 use tauri::{AppHandle, Emitter};
 
 /// Capture performance statistics.
@@ -25,33 +26,18 @@ pub struct WindowGeometry {
 
 /// Combined data packet sent to the Shittim Chest (Frontend) every frame.
 #[derive(Clone, serde::Serialize)]
-struct ShittimPayload {
-    battle_state: String,
-    fps: f64,
-    stats: Option<CaptureStats>,
-    timer: Option<TimerValue>,
-    cost: Option<CostValue>,
-    window: WindowGeometry,
+pub struct ShittimPayload {
+    pub battle_state: String,
+    pub fps: f64,
+    pub stats: Option<CaptureStats>,
+    pub timer: Option<TimerValue>,
+    pub cost: Option<CostValue>,
+    pub window: WindowGeometry,
+    /// What to use next, once a timeline is loaded.
+    pub guidance: Option<Guidance>,
 }
 
 /// Transmits tactical data to the Shittim Chest.
-pub fn sync_to_chest(
-    app_handle: &AppHandle,
-    battle_state: &str,
-    timer: Option<TimerValue>,
-    cost: Option<CostValue>,
-    fps: f64,
-    stats: Option<CaptureStats>,
-    window: WindowGeometry,
-) {
-    let payload = ShittimPayload {
-        battle_state: battle_state.to_string(),
-        fps,
-        stats,
-        timer,
-        cost,
-        window,
-    };
-
-    let _ = app_handle.emit("link-sync", &payload);
+pub fn sync_to_chest(app_handle: &AppHandle, payload: &ShittimPayload) {
+    let _ = app_handle.emit("link-sync", payload);
 }
