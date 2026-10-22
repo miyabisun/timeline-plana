@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    env:
+      ASSET: timeline-plana-x86_64-pc-windows-msvc.exe
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@1.96.0
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Check that the tag matches package.json
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ("v$version" -ne $env:GITHUB_REF_NAME) {
+            throw "tag $env:GITHUB_REF_NAME does not match package.json version $version"
+          }
+
+      - name: Build the app
+        run: |
+          npm ci
+          npm run tauri build -- --no-bundle
+
+      - name: Package the exe and its SHA-256
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist-release | Out-Null
+          Copy-Item src-tauri\target\release\timeline-plana.exe "dist-release\$env:ASSET"
+          $hash = (Get-FileHash "dist-release\$env:ASSET" -Algorithm SHA256).Hash.ToLowerInvariant()
+          [IO.File]::WriteAllText("$PWD\dist-release\$env:ASSET.sha256", "$hash  $env:ASSET`n")
+          Get-Content "dist-release\$env:ASSET.sha256"
+
+      - name: Publish the GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create $env:GITHUB_REF_NAME "dist-release\$env:ASSET" "dist-release\$env:ASSET.sha256" --title $env:GITHUB_REF_NAME --generate-notes --verify-tag
