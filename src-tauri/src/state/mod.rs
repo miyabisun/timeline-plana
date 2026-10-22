@@ -1,40 +1,33 @@
 // App state definitions
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
+/// Debug image requests from the frontend; the capture side takes each one once.
+#[derive(Default)]
 pub struct DebugState {
-    pub should_screenshot: Mutex<bool>,
-    pub should_save_binary: Mutex<bool>,
-    pub should_save_cost_roi: Mutex<bool>,
-    pub should_full_screenshot: Mutex<bool>,
+    pub should_screenshot: AtomicBool,
+    pub should_save_binary: AtomicBool,
+    pub should_save_cost_roi: AtomicBool,
+    pub should_full_screenshot: AtomicBool,
 }
 
 impl DebugState {
     pub fn new() -> Self {
-        Self {
-            should_screenshot: Mutex::new(false),
-            should_save_binary: Mutex::new(false),
-            should_save_cost_roi: Mutex::new(false),
-            should_full_screenshot: Mutex::new(false),
-        }
+        Self::default()
     }
 
     pub fn request_screenshot(&self) {
-        let mut lock = self.should_screenshot.lock().unwrap();
-        *lock = true;
+        self.should_screenshot.store(true, Ordering::Relaxed);
     }
 
     pub fn request_binary_image(&self) {
-        let mut lock = self.should_save_binary.lock().unwrap();
-        *lock = true;
+        self.should_save_binary.store(true, Ordering::Relaxed);
     }
 
     pub fn request_cost_roi_image(&self) {
-        let mut lock = self.should_save_cost_roi.lock().unwrap();
-        *lock = true;
+        self.should_save_cost_roi.store(true, Ordering::Relaxed);
     }
 
     pub fn request_full_screenshot(&self) {
-        let mut lock = self.should_full_screenshot.lock().unwrap();
-        *lock = true;
+        self.should_full_screenshot.store(true, Ordering::Relaxed);
     }
 }

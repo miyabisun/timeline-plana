@@ -1,7 +1,7 @@
 use crate::core::combat_intel::BattleState;
 
 use crate::state::DebugState;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
@@ -29,6 +29,12 @@ pub struct InterceptorManager {
     pub is_running: Arc<AtomicBool>,
     // Flag to signal stop request (for future use)
     pub should_stop: Arc<AtomicBool>,
+}
+
+impl Default for InterceptorManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl InterceptorManager {
@@ -104,6 +110,513 @@ struct LogicState {
     current_battle_state: BattleState,
 }
 
+impl LogicState {
+    /// Moves the battle state on from what the frame in `payload` shows.
+    fn update(&mut self, payload: &CapturePayload) {
+        use crate::core::combat_intel::{
+            check_pause_presence_in_wide_roi, compute_pause_ncc_from_roi, PAUSE_NCC_THRESHOLD,
+        };
+        // The ROI is now 85-100% of the screen.
+        // Right part contains the Pause Button.
+        let is_pause_visible = check_pause_presence_in_wide_roi(
+            &payload.rgb_data,
+            payload.roi_width,
+            payload.roi_height,
+        );
+
+        if is_pause_visible {
+            self.last_active_time = Instant::now();
+            self.current_battle_state = BattleState::Active;
+        } else if self.current_battle_state != BattleState::Inactive {
+            // Paused/Slow transitions only allowed from Active/Paused/Slow.
+            // Prevents home screen (bright but not battle) from triggering Paused.
+            // NCC template matching (only when needed, skipped during Active)
+            let pause_score = compute_pause_ncc_from_roi(
+                &payload.pause_roi_rgba,
+                payload.pause_roi_width,
+                payload.pause_roi_height,
+            );
+            let brightness = payload.center_brightness;
+            if pause_score > PAUSE_NCC_THRESHOLD {
+                // PAUSE dialog template matched → definitively Paused
+                self.last_active_time = Instant::now();
+                self.current_battle_state = BattleState::Paused;
+            } else if brightness > 150.0 {
+                // Bright center = PAUSE menu visible
+                self.last_active_time = Instant::now();
+                self.current_battle_state = BattleState::Paused;
+            } else if brightness < 100.0 {
+                // Dark overlay = skill confirmation / slow-motion
+                self.last_active_time = Instant::now();
+                self.current_battle_state = BattleState::Slow;
+            } else if self.last_active_time.elapsed() > Duration::from_secs(2) {
+                // Persistence: Only switch to Inactive after 2s
+                self.current_battle_state = BattleState::Inactive;
+            }
+            // Otherwise keep previous state (hysteresis)
+        }
+    }
+}
+
+/// A rectangle of the content area in pixels: columns `left..right`, rows `top..bottom`.
+#[derive(Clone, Copy)]
+struct Region {
+    left: u32,
+    right: u32,
+    top: u32,
+    bottom: u32,
+}
+
+impl Region {
+    /// The part of a `width` x `height` area between the given fractions of it.
+    fn of(width: u32, height: u32, (left, right): (f32, f32), (top, bottom): (f32, f32)) -> Self {
+        Self {
+            left: (width as f32 * left) as u32,
+            right: (width as f32 * right) as u32,
+            top: (height as f32 * top) as u32,
+            bottom: (height as f32 * bottom) as u32,
+        }
+    }
+
+    fn width(self) -> u32 {
+        self.right.saturating_sub(self.left)
+    }
+
+    fn height(self) -> u32 {
+        self.bottom.saturating_sub(self.top)
+    }
+}
+
+/// The RGB pixels of `region` in an RGBA buffer whose rows are `stride` pixels long. Rows
+/// that run past the end of the buffer are left out.
+fn crop_rgb(rgba: &[u8], stride: u32, region: Region) -> Vec<u8> {
+    let mut rgb = Vec::with_capacity((region.width() * region.height() * 3) as usize);
+    for y in region.top..region.bottom {
+        let row_start = (y * stride + region.left) as usize * 4;
+        let row_end = (y * stride + region.right) as usize * 4;
+        if row_end <= rgba.len() {
+            for chunk in rgba[row_start..row_end].chunks_exact(4) {
+                rgb.extend_from_slice(&chunk[0..3]);
+            }
+        }
+    }
+    rgb
+}
+
+/// The folder the debug images go to: the project root's `output` (not src-tauri/output).
+fn debug_output_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("the crate folder src-tauri sits inside the project folder")
+        .join("output")
+}
+
+/// Time since the Unix epoch; zero if the clock is set before it.
+fn since_epoch() -> Duration {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+}
+
+/// The time of day (UTC) as `HHMMSS_mmm`, which names the debug images.
+fn clock_stamp() -> String {
+    let now = since_epoch();
+    let secs = now.as_secs();
+    let h = (secs / 3600) % 24;
+    let m = (secs / 60) % 60;
+    let s = secs % 60;
+    let millis = now.subsec_millis();
+    format!("{h:02}{m:02}{s:02}_{millis:03}")
+}
+
+/// Waits for the producer's next frame and takes it.
+fn next_payload((lock, cvar): &(Mutex<Option<CapturePayload>>, Condvar)) -> CapturePayload {
+    // A panic elsewhere while holding the lock leaves at worst a stale frame, which the
+    // next one replaces, so a poisoned lock is used as it is.
+    let mut guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
+    loop {
+        if let Some(payload) = guard.take() {
+            return payload;
+        }
+        guard = cvar.wait(guard).unwrap_or_else(PoisonError::into_inner);
+    }
+}
+
+/// Saves the binarized timer of the frame as `binary_MM-SS-mmm.png`, or
+/// `binary_failed_<ms since epoch>.png` when it cannot be read.
+fn save_binary_timer(payload: &CapturePayload) {
+    use crate::core::countdown_monitor::{binarize_for_ocr, process_timer_region, recognize_timer};
+    println!("Saving binary timer image for debug...");
+    let (rgb_data, width, height) = (&payload.rgb_data, payload.roi_width, payload.roi_height);
+    let (processed, proc_w, proc_h) = process_timer_region(rgb_data, width, height);
+    let binary = binarize_for_ocr(&processed, proc_w, proc_h);
+    let debug_output_dir = debug_output_dir();
+    let _ = std::fs::create_dir_all(&debug_output_dir);
+
+    let filename = if let Some(timer) = recognize_timer(rgb_data, width, height) {
+        debug_output_dir.join(format!(
+            "binary_{:02}-{:02}-{:03}.png",
+            timer.minutes, timer.seconds, timer.milliseconds
+        ))
+    } else {
+        debug_output_dir.join(format!("binary_failed_{}.png", since_epoch().as_millis()))
+    };
+
+    let _ = image::save_buffer(&filename, &binary, proc_w, proc_h, image::ColorType::L8);
+    println!("Saved binary image to {}", filename.display());
+}
+
+/// Saves the skew-corrected cost gauge of the frame as `cost_roi_<time>.png`.
+fn save_cost_roi(payload: &CapturePayload) {
+    use crate::core::resource_survey::{apply_cost_skew, COST_SKEW_FACTOR};
+    let (cost_w, cost_h) = (payload.cost_roi_width, payload.cost_roi_height);
+    if cost_w == 0 || cost_h == 0 {
+        return;
+    }
+    let debug_output_dir = debug_output_dir();
+    let _ = std::fs::create_dir_all(&debug_output_dir);
+    let (corrected, corr_w, corr_h) =
+        apply_cost_skew(&payload.cost_rgb_data, cost_w, cost_h, COST_SKEW_FACTOR);
+    let filename = debug_output_dir.join(format!("cost_roi_{}.png", clock_stamp()));
+    let _ = image::save_buffer(
+        &filename,
+        &corrected,
+        corr_w,
+        corr_h,
+        image::ColorType::Rgb8,
+    );
+    println!("Saved cost ROI to {}", filename.display());
+}
+
+/// Reads the timer and the cost gauge of the frame.
+fn read_timer_and_cost(
+    payload: &CapturePayload,
+) -> (
+    Option<crate::core::countdown_monitor::TimerValue>,
+    Option<crate::core::resource_survey::CostValue>,
+) {
+    let (width, height) = (payload.roi_width, payload.roi_height);
+    // Timer Extraction
+    // We must SUB-CROP the Timer part to pass to countdown_monitor
+    // Capture is 85.49%-100% (Width = 14.51%)
+    // Timer is 85.49%-93.52% (Width = 8.03%)
+    let timer_cols = (width as f32 * (0.0803 / 0.1451)) as u32;
+    let timer_cols = timer_cols.min(width); // Safety cap
+
+    // Extract logic (copying to new buffer for OCR API)
+    let mut timer_data = Vec::with_capacity((timer_cols * height * 3) as usize);
+    for y in 0..height {
+        let row_start = (y * width) as usize * 3;
+        let row_end = row_start + (timer_cols as usize * 3);
+        timer_data.extend_from_slice(&payload.rgb_data[row_start..row_end]);
+    }
+
+    // Use specialized function for pre-cropped ROI
+    let timer =
+        crate::core::countdown_monitor::recognize_timer_from_roi(&timer_data, timer_cols, height);
+
+    // Cost Gauge Reading (max_cost = 10 default, future: from timeline)
+    let cost = if payload.cost_roi_width > 0 && payload.cost_roi_height > 0 {
+        crate::core::resource_survey::read_cost_gauge(
+            &payload.cost_rgb_data,
+            payload.cost_roi_width,
+            payload.cost_roi_height,
+            10,
+        )
+    } else {
+        None
+    };
+    (timer, cost)
+}
+
+/// The worker (consumer): takes each latest frame, saves the debug images asked for, follows
+/// the battle state, reads the timer and the cost during a battle, and sends it all to the
+/// frontend. The loop never ends; a graceful shutdown would need a shared stop flag or
+/// another Condvar signal.
+fn run_worker(
+    app_handle: &AppHandle,
+    debug_state: &DebugState,
+    latest_frame: &(Mutex<Option<CapturePayload>>, Condvar),
+    stats: &Mutex<Option<crate::core::shittim_link::CaptureStats>>,
+) {
+    println!("Worker Thread (Consumer) started");
+    let mut logic_state = LogicState {
+        last_active_time: Instant::now(),
+        current_battle_state: BattleState::Inactive,
+    };
+
+    loop {
+        let payload = next_payload(latest_frame);
+
+        if debug_state
+            .should_save_binary
+            .swap(false, Ordering::Relaxed)
+        {
+            save_binary_timer(&payload);
+        }
+        if debug_state
+            .should_save_cost_roi
+            .swap(false, Ordering::Relaxed)
+        {
+            save_cost_roi(&payload);
+        }
+
+        logic_state.update(&payload);
+
+        let (current_timer, current_cost) =
+            if logic_state.current_battle_state == BattleState::Inactive {
+                (None, None)
+            } else {
+                read_timer_and_cost(&payload)
+            };
+
+        // Read latest stats from producer
+        let current_stats = stats.lock().unwrap_or_else(PoisonError::into_inner).clone();
+
+        crate::core::shittim_link::sync_to_chest(
+            app_handle,
+            &format!("{:?}", logic_state.current_battle_state),
+            current_timer,
+            current_cost,
+            60.0, // Game window capture rate (WGC 60 FPS)
+            current_stats,
+            crate::core::shittim_link::WindowGeometry {
+                x: payload.client_x,
+                y: payload.client_y,
+                width: payload.client_width,
+                height: payload.client_height,
+            },
+        );
+    }
+}
+
+/// Where the game window's client area is, as Windows reports it now.
+struct ClientArea {
+    /// The visible window frame (DWM extended frame bounds), when DWM can tell. It matches
+    /// the Graphics Capture API frame, unlike `GetWindowRect`, which includes the invisible
+    /// DWM shadow borders.
+    frame: Option<RECT>,
+    /// The client area's size (`right` x `bottom`).
+    size: RECT,
+    /// The client area's top-left corner on the screen.
+    origin: POINT,
+}
+
+impl ClientArea {
+    fn of(hwnd: usize) -> Self {
+        let mut frame = RECT::default();
+        let mut size = RECT::default();
+        let mut origin = POINT { x: 0, y: 0 };
+        // SAFETY: the three locals outlive the calls that write into them, and the size
+        // passed with `frame` is that of a RECT; a window handle that is no longer valid only
+        // makes the calls fail.
+        let frame_ok = unsafe {
+            let hwnd = HWND(hwnd as *mut std::ffi::c_void);
+            let ok = DwmGetWindowAttribute(
+                hwnd,
+                DWMWA_EXTENDED_FRAME_BOUNDS,
+                (&raw mut frame).cast::<std::ffi::c_void>(),
+                std::mem::size_of::<RECT>() as u32,
+            )
+            .is_ok();
+            let _ = GetClientRect(hwnd, &raw mut size);
+            let _ = ClientToScreen(hwnd, &raw mut origin);
+            ok
+        };
+        Self {
+            frame: frame_ok.then_some(frame),
+            size,
+            origin,
+        }
+    }
+
+    /// Where the client area starts within the captured frame. If DWM is unavailable
+    /// (remote desktop, DWM disabled), there is no crop: the full frame is processed as-is.
+    fn offset(&self) -> (u32, u32) {
+        self.frame.map_or((0, 0), |frame| {
+            (
+                (self.origin.x - frame.left).max(0) as u32,
+                (self.origin.y - frame.top).max(0) as u32,
+            )
+        })
+    }
+}
+
+/// The client area of a packed RGBA frame: the frame itself when the client area starts at
+/// its corner, or else the client area copied into `crop_buffer`. This removes the title bar
+/// and the window borders in CPU, avoiding D3D11 `buffer_crop`, which can cause allocation
+/// issues; `crop_buffer` keeps its allocation across frames.
+fn crop_client<'a>(
+    crop_buffer: &'a mut Vec<u8>,
+    packed: &'a [u8],
+    (frame_width, frame_height): (u32, u32),
+    (offset_x, offset_y): (u32, u32),
+    (client_width, client_height): (u32, u32),
+) -> (&'a [u8], u32, u32) {
+    let crop_w = client_width.min(frame_width.saturating_sub(offset_x));
+    let crop_h = client_height.min(frame_height.saturating_sub(offset_y));
+    if (offset_x == 0 && offset_y == 0) || crop_w == 0 || crop_h == 0 {
+        return (packed, frame_width, frame_height);
+    }
+    crop_buffer.clear();
+    let row_bytes = crop_w as usize * 4;
+    let mut actual_h = 0u32;
+    for y in 0..crop_h {
+        let src = (offset_y + y) as usize * frame_width as usize * 4 + offset_x as usize * 4;
+        let end = src + row_bytes;
+        if end > packed.len() {
+            break;
+        }
+        crop_buffer.extend_from_slice(&packed[src..end]);
+        actual_h += 1;
+    }
+    (crop_buffer, crop_w, actual_h)
+}
+
+/// Saves the game content area (after title bar + black bar removal) as
+/// `full_screenshot_<time>.png`.
+fn save_full_screenshot(work_data: &[u8], work_width: u32, content: Region) {
+    let debug_output_dir = debug_output_dir();
+    let _ = std::fs::create_dir_all(&debug_output_dir);
+    let path = debug_output_dir.join(format!("full_screenshot_{}.png", clock_stamp()));
+    // Extract content area (RGBA → RGB) using work_data with stride = work_width
+    let rgb = crop_rgb(work_data, work_width, content);
+    if let Some(img) = image::RgbImage::from_raw(content.width(), content.height(), rgb) {
+        let _ = img.save(&path);
+        println!("Full screenshot saved to {}", path.display());
+    }
+}
+
+/// Saves the timer region of the current frame, normalized and skew-corrected, as
+/// `timer_roi_<time>.png`.
+fn save_timer_roi(work_data: &[u8], work_width: u32, (content_width, content_height): (u32, u32)) {
+    use crate::core::countdown_monitor::{apply_skew_correction, normalize_roi, SKEW_FACTOR};
+    let debug_output_dir = debug_output_dir();
+    let _ = std::fs::create_dir_all(&debug_output_dir);
+    let path = debug_output_dir.join(format!("timer_roi_{}.png", clock_stamp()));
+    // Extract timer ROI (85.49%-93.52%, 3.60%-6.51%) from work_data
+    let timer = Region::of(
+        content_width,
+        content_height,
+        (0.8549, 0.9352),
+        (0.0360, 0.0651),
+    );
+    if timer.width() == 0 || timer.height() == 0 {
+        return;
+    }
+    let timer_rgb = crop_rgb(work_data, work_width, timer);
+    // Apply normalize + skew correction
+    let (norm, norm_w, norm_h) = normalize_roi(&timer_rgb, timer.width(), timer.height());
+    let (skewed, skew_w, skew_h) = apply_skew_correction(&norm, norm_w, norm_h, SKEW_FACTOR);
+    if let Some(img) = image::RgbImage::from_raw(skew_w, skew_h, skewed) {
+        let _ = img.save(&path);
+        println!("Timer ROI saved to {}", path.display());
+    }
+}
+
+/// What the worker reads from a frame: the header strip (timer + pause button), the cost
+/// gauge, the center brightness and the PAUSE dialog area. `None` when the header strip is
+/// empty.
+fn build_payload(
+    work_data: &[u8],
+    work_width: u32,
+    (content_width, content_height): (u32, u32),
+    origin: POINT,
+) -> Option<CapturePayload> {
+    use crate::core::combat_intel::{
+        PAUSE_ROI_X_END, PAUSE_ROI_X_START, PAUSE_ROI_Y_END, PAUSE_ROI_Y_START,
+    };
+    // OPTIMIZATION: Copy Header Strip (Timer + Pause Button)
+    // Timer ROI: x 85.49%-100%, y 3.60%-6.51%
+    // ROI percentages are content-relative (excluding black bars)
+    let roi = Region {
+        right: content_width, // 100% of content
+        ..Region::of(
+            content_width,
+            content_height,
+            (0.8549, 1.0),
+            (0.0360, 0.0651),
+        )
+    };
+    if roi.width() == 0 || roi.height() == 0 {
+        return None;
+    }
+
+    // Cost Gauge ROI (content-relative): x=64.49%..89.61%, y=94.68%..96.97%
+    let cost = Region::of(
+        content_width,
+        content_height,
+        (0.6449, 0.8961),
+        (0.9468, 0.9697),
+    );
+
+    // Extract PAUSE ROI for consumer-side NCC matching (cheap crop only)
+    let pause = Region::of(
+        content_width,
+        content_height,
+        (PAUSE_ROI_X_START, PAUSE_ROI_X_END),
+        (PAUSE_ROI_Y_START, PAUSE_ROI_Y_END),
+    );
+    let mut pause_roi_rgba = Vec::with_capacity((pause.width() * pause.height() * 4) as usize);
+    for y in pause.top..pause.bottom {
+        let src_start = (y * work_width + pause.left) as usize * 4;
+        let src_end = (y * work_width + pause.right) as usize * 4;
+        if src_end <= work_data.len() {
+            pause_roi_rgba.extend_from_slice(&work_data[src_start..src_end]);
+        }
+    }
+
+    Some(CapturePayload {
+        // Extract only ROI pixels (stride = work_width, no padding)
+        rgb_data: crop_rgb(work_data, work_width, roi),
+        roi_width: roi.width(),
+        roi_height: roi.height(),
+        cost_rgb_data: crop_rgb(work_data, work_width, cost),
+        cost_roi_width: cost.width(),
+        cost_roi_height: cost.height(),
+        client_x: origin.x,
+        client_y: origin.y,
+        client_width: content_width,
+        client_height: content_height,
+        // Sample center brightness for Paused/Slow state detection
+        // Uses content dimensions for center point, work_width for stride
+        center_brightness: sample_center_brightness(
+            work_data,
+            work_width,
+            content_width,
+            content_height,
+        ),
+        pause_roi_rgba,
+        pause_roi_width: pause.width(),
+        pause_roi_height: pause.height(),
+    })
+}
+
+impl CaptureHandler {
+    /// Counts a frame Windows delivered, and every 10 seconds hands the frame rates to the
+    /// worker.
+    fn count_frame(&mut self, now: Instant) {
+        self.fps_counter_received += 1;
+        if now.duration_since(self.fps_last_log_time) < Duration::from_secs(10) {
+            return;
+        }
+        let elapsed = now.duration_since(self.fps_last_log_time).as_secs_f64();
+        *self
+            .shared_stats
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) =
+            Some(crate::core::shittim_link::CaptureStats {
+                received: self.fps_counter_received as f64 / elapsed,
+                accepted: self.fps_counter_accepted as f64 / elapsed,
+                queue_full: self.fps_queue_full,
+            });
+        self.fps_counter_received = 0;
+        self.fps_queue_full = 0;
+        self.fps_counter_accepted = 0;
+        self.fps_last_log_time = now;
+    }
+}
+
 impl GraphicsCaptureApiHandler for CaptureHandler {
     type Flags = CaptureFlags;
     type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -125,231 +638,7 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
 
         // Spawn the Worker Thread (Consumer)
         thread::spawn(move || {
-            println!("Worker Thread (Consumer) started");
-            let (lock, cvar) = &*consumer_frame;
-
-            // State Cache Mechanism
-            // let mut frame_count: u64 = 0; // Unused
-            // let mut cached_battle_state = BattleState::Inactive; (Replaced by LogicState)
-            let mut logic_state = LogicState {
-                last_active_time: Instant::now(),
-                current_battle_state: BattleState::Inactive,
-            };
-
-            loop {
-                // Wait for a new frame
-                let payload = {
-                    let mut guard = lock.lock().unwrap();
-                    while guard.is_none() {
-                        guard = cvar.wait(guard).unwrap();
-                    }
-                    guard.take().unwrap()
-                };
-
-                let rgb_data = payload.rgb_data;
-                let width = payload.roi_width;
-                let height = payload.roi_height;
-                let cost_rgb_data = payload.cost_rgb_data;
-                let cost_w = payload.cost_roi_width;
-                let cost_h = payload.cost_roi_height;
-                let client_x = payload.client_x;
-                let client_y = payload.client_y;
-                let client_width = payload.client_width;
-                let client_height = payload.client_height;
-
-                // Debug output directory: project root /output (not src-tauri/output)
-                let debug_output_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .parent()
-                    .unwrap()
-                    .join("output");
-
-                // 1. Check for Binary Debug Request
-                {
-                    let mut save_binary = debug_state.should_save_binary.lock().unwrap();
-                    if *save_binary {
-                        println!("Saving binary timer image for debug...");
-                        let (processed, proc_w, proc_h) =
-                            crate::core::countdown_monitor::process_timer_region(
-                                &rgb_data, width, height,
-                            );
-                        let binary = crate::core::countdown_monitor::binarize_for_ocr(
-                            &processed, proc_w, proc_h,
-                        );
-                        let _ = std::fs::create_dir_all(&debug_output_dir);
-
-                        let filename = if let Some(timer) =
-                            crate::core::countdown_monitor::recognize_timer(
-                                &rgb_data, width, height,
-                            ) {
-                            debug_output_dir.join(format!(
-                                "binary_{:02}-{:02}-{:03}.png",
-                                timer.minutes, timer.seconds, timer.milliseconds
-                            ))
-                        } else {
-                            debug_output_dir.join(format!(
-                                "binary_failed_{}.png",
-                                std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap()
-                                    .as_millis()
-                            ))
-                        };
-
-                        let _ = image::save_buffer(
-                            &filename,
-                            &binary,
-                            proc_w,
-                            proc_h,
-                            image::ColorType::L8,
-                        );
-                        println!("Saved binary image to {:?}", filename);
-                        *save_binary = false;
-                    }
-                }
-
-                // 3. Check for Cost ROI Debug Request
-                {
-                    let mut save_cost = debug_state.should_save_cost_roi.lock().unwrap();
-                    if *save_cost {
-                        *save_cost = false;
-                        if cost_w > 0 && cost_h > 0 {
-                            let _ = std::fs::create_dir_all(&debug_output_dir);
-                            let (corrected, corr_w, corr_h) =
-                                crate::core::resource_survey::apply_cost_skew(
-                                    &cost_rgb_data,
-                                    cost_w,
-                                    cost_h,
-                                    crate::core::resource_survey::COST_SKEW_FACTOR,
-                                );
-                            let now = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap();
-                            let secs = now.as_secs();
-                            let millis = now.subsec_millis();
-                            let h = (secs / 3600) % 24;
-                            let m = (secs / 60) % 60;
-                            let s = secs % 60;
-                            let filename = debug_output_dir.join(format!(
-                                "cost_roi_{:02}{:02}{:02}_{:03}.png",
-                                h, m, s, millis
-                            ));
-                            let _ = image::save_buffer(
-                                &filename,
-                                &corrected,
-                                corr_w,
-                                corr_h,
-                                image::ColorType::Rgb8,
-                            );
-                            println!("Saved cost ROI to {:?}", filename);
-                        }
-                    }
-                }
-
-                // 4. Battle State Analysis
-                // The ROI is now 85-100% of the screen.
-                // Right part contains the Pause Button.
-                let is_pause_visible = crate::core::combat_intel::check_pause_presence_in_wide_roi(
-                    &rgb_data, width, height,
-                );
-
-                if is_pause_visible {
-                    logic_state.last_active_time = Instant::now();
-                    logic_state.current_battle_state = BattleState::Active;
-                } else if logic_state.current_battle_state != BattleState::Inactive {
-                    // Paused/Slow transitions only allowed from Active/Paused/Slow.
-                    // Prevents home screen (bright but not battle) from triggering Paused.
-                    // NCC template matching (only when needed, skipped during Active)
-                    let pause_score = crate::core::combat_intel::compute_pause_ncc_from_roi(
-                        &payload.pause_roi_rgba,
-                        payload.pause_roi_width,
-                        payload.pause_roi_height,
-                    );
-                    let brightness = payload.center_brightness;
-                    if pause_score > crate::core::combat_intel::PAUSE_NCC_THRESHOLD {
-                        // PAUSE dialog template matched → definitively Paused
-                        logic_state.last_active_time = Instant::now();
-                        logic_state.current_battle_state = BattleState::Paused;
-                    } else if brightness > 150.0 {
-                        // Bright center = PAUSE menu visible
-                        logic_state.last_active_time = Instant::now();
-                        logic_state.current_battle_state = BattleState::Paused;
-                    } else if brightness < 100.0 {
-                        // Dark overlay = skill confirmation / slow-motion
-                        logic_state.last_active_time = Instant::now();
-                        logic_state.current_battle_state = BattleState::Slow;
-                    } else if logic_state.last_active_time.elapsed() > Duration::from_secs(2) {
-                        // Persistence: Only switch to Inactive after 2s
-                        logic_state.current_battle_state = BattleState::Inactive;
-                    }
-                    // Otherwise keep previous state (hysteresis)
-                }
-
-                // 4. Timer OCR & Cost Gauge Reading
-                let mut current_timer: Option<crate::core::countdown_monitor::TimerValue> = None;
-                let mut current_cost: Option<crate::core::resource_survey::CostValue> = None;
-
-                if logic_state.current_battle_state != BattleState::Inactive {
-                    // Timer Extraction
-                    // We must SUB-CROP the Timer part to pass to countdown_monitor
-                    // Capture is 85.49%-100% (Width = 14.51%)
-                    // Timer is 85.49%-93.52% (Width = 8.03%)
-                    let timer_cols = (width as f32 * (0.0803 / 0.1451)) as u32;
-                    let timer_cols = timer_cols.min(width); // Safety cap
-
-                    // Extract logic (copying to new buffer for OCR API)
-                    let mut timer_data = Vec::with_capacity((timer_cols * height * 3) as usize);
-                    for y in 0..height {
-                        let row_start = (y * width) as usize * 3;
-                        let row_end = row_start + (timer_cols as usize * 3);
-                        timer_data.extend_from_slice(&rgb_data[row_start..row_end]);
-                    }
-
-                    // Use specialized function for pre-cropped ROI
-                    if let Some(timer) = crate::core::countdown_monitor::recognize_timer_from_roi(
-                        &timer_data,
-                        timer_cols,
-                        height,
-                    ) {
-                        current_timer = Some(timer);
-                    }
-
-                    // Cost Gauge Reading (max_cost = 10 default, future: from timeline)
-                    if cost_w > 0 && cost_h > 0 {
-                        current_cost = crate::core::resource_survey::read_cost_gauge(
-                            &cost_rgb_data,
-                            cost_w,
-                            cost_h,
-                            10,
-                        );
-                    }
-                }
-
-                // 5. Shittim Link Sync
-                // Read latest stats from producer
-                let current_stats = {
-                    let guard = consumer_stats.lock().unwrap();
-                    guard.clone()
-                };
-
-                crate::core::shittim_link::sync_to_chest(
-                    &app_handle,
-                    &format!("{:?}", logic_state.current_battle_state),
-                    current_timer,
-                    current_cost,
-                    60.0, // Game window capture rate (WGC 60 FPS)
-                    current_stats,
-                    crate::core::shittim_link::WindowGeometry {
-                        x: client_x,
-                        y: client_y,
-                        width: client_width,
-                        height: client_height,
-                    },
-                );
-                // 5. MJPEG Streaming - REMOVED
-            }
-            // The loop is infinite, so this line is unreachable unless the thread panics or is explicitly stopped.
-            // For a graceful shutdown, a shared atomic flag or another Condvar signal would be needed.
-            // println!("Worker Thread finished.");
+            run_worker(&app_handle, &debug_state, &consumer_frame, &consumer_stats);
         });
 
         Ok(Self {
@@ -375,35 +664,7 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
         _capture_control: InternalCaptureControl,
     ) -> Result<(), Self::Error> {
         let now = Instant::now();
-
-        // FPS Logging: Every 10 seconds, output stats
-        self.fps_counter_received += 1;
-        if now.duration_since(self.fps_last_log_time) >= Duration::from_secs(10) {
-            let elapsed = now.duration_since(self.fps_last_log_time).as_secs_f64();
-            let received_fps = self.fps_counter_received as f64 / elapsed;
-            let accepted_fps = self.fps_counter_accepted as f64 / elapsed;
-            let queue_full = self.fps_queue_full;
-            // let total_push = self.fps_counter_accepted;
-
-            // Update shared stats instead of printing
-            {
-                let mut stats_guard = self.shared_stats.lock().unwrap();
-                *stats_guard = Some(crate::core::shittim_link::CaptureStats {
-                    received: received_fps,
-                    accepted: accepted_fps,
-                    queue_full: queue_full,
-                });
-            }
-
-            // println!(
-            //     "[FPS] Received: {:.1}, Accepted: {:.1}, QueueFull: {}/{}",
-            //     received_fps, accepted_fps, queue_full, total_push
-            // );
-            self.fps_counter_received = 0;
-            self.fps_queue_full = 0;
-            self.fps_counter_accepted = 0;
-            self.fps_last_log_time = now;
-        }
+        self.count_frame(now);
 
         // Process at ~30 FPS (33ms). WGC delivers at 60 FPS (16ms) so fresh
         // frames are always available. Consumer has 33ms to finish before the
@@ -414,327 +675,89 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
         self.last_frame_time = now;
         self.fps_counter_accepted += 1;
 
-        // Get window geometry for crop calculation and overlay positioning.
-        // DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS) returns the visible
-        // window rect that matches the Graphics Capture API frame (excluding
-        // invisible DWM shadow borders that GetWindowRect incorrectly includes).
-        let mut dwm_rect = RECT::default();
-        let mut client_rect = RECT::default();
-        let mut client_point = POINT { x: 0, y: 0 };
-        let dwm_ok;
-        unsafe {
-            let hwnd = HWND(self.hwnd as *mut std::ffi::c_void);
-            dwm_ok = DwmGetWindowAttribute(
-                hwnd,
-                DWMWA_EXTENDED_FRAME_BOUNDS,
-                &mut dwm_rect as *mut _ as *mut std::ffi::c_void,
-                std::mem::size_of::<RECT>() as u32,
-            )
-            .is_ok();
-            let _ = GetClientRect(hwnd, &mut client_rect);
-            let _ = ClientToScreen(hwnd, &mut client_point);
-        }
-
-        // Calculate client area offset within capture frame.
-        // If DWM is unavailable (remote desktop, DWM disabled), fall back to
-        // no crop — full frame is processed as-is.
-        let (offset_x, offset_y) = if dwm_ok {
-            (
-                (client_point.x - dwm_rect.left).max(0) as u32,
-                (client_point.y - dwm_rect.top).max(0) as u32,
-            )
-        } else {
-            (0, 0)
-        };
-        let client_width = client_rect.right as u32;
-        let client_height = client_rect.bottom as u32;
+        // Window geometry for crop calculation and overlay positioning.
+        let area = ClientArea::of(self.hwnd);
+        let (offset_x, offset_y) = area.offset();
+        let client_width = area.size.right as u32;
+        let client_height = area.size.bottom as u32;
 
         // Always use frame.buffer() — proven stable. Software crop below
         // extracts client area safely (avoids D3D11 buffer_crop issues).
-        let buffer_result = frame.buffer();
-
-        if let Ok(mut buffer) = buffer_result {
-            let frame_width = buffer.width();
-            let frame_height = buffer.height();
-
-            if !self.first_crop_logged {
-                self.first_crop_logged = true;
-                println!(
-                    "[Crop Debug] frame={}x{}, dwm=({},{},{},{}), client_pt=({},{}), client={}x{}, offset=({},{})",
-                    frame_width, frame_height,
-                    dwm_rect.left, dwm_rect.top, dwm_rect.right, dwm_rect.bottom,
-                    client_point.x, client_point.y,
-                    client_width, client_height,
-                    offset_x, offset_y,
-                );
-            }
-
-            if let Ok(packed_slice) = buffer.as_nopadding_buffer() {
-                // Software crop: extract client area from full frame
-                // This removes the title bar and window borders safely in CPU,
-                // avoiding D3D11 buffer_crop which can cause allocation issues.
-                // Uses self.crop_buffer to reuse allocation across frames.
-                let crop_w = client_width.min(frame_width.saturating_sub(offset_x));
-                let crop_h = client_height.min(frame_height.saturating_sub(offset_y));
-                let (work_data, work_width, work_height): (&[u8], u32, u32) =
-                    if (offset_x > 0 || offset_y > 0) && crop_w > 0 && crop_h > 0 {
-                        self.crop_buffer.clear();
-                        let row_bytes = crop_w as usize * 4;
-                        let mut actual_h = 0u32;
-                        for y in 0..crop_h {
-                            let src = (offset_y + y) as usize * frame_width as usize * 4
-                                + offset_x as usize * 4;
-                            let end = src + row_bytes;
-                            if end <= packed_slice.len() {
-                                self.crop_buffer.extend_from_slice(&packed_slice[src..end]);
-                                actual_h += 1;
-                            } else {
-                                break;
-                            }
-                        }
-                        (&self.crop_buffer, crop_w, actual_h)
-                    } else {
-                        (packed_slice, frame_width, frame_height)
-                    };
-
-                // Detect content bounds (exclude black bars from game rendering)
-                // Cached: recompute every 150 frames (~5s) since black bars are static
-                self.content_bounds_counter += 1;
-                let (content_width, content_height) =
-                    if let Some(bounds) = self.cached_content_bounds {
-                        if self.content_bounds_counter % 150 == 0 {
-                            let b = detect_content_bounds(&work_data, work_width, work_height, 4);
-                            self.cached_content_bounds = Some(b);
-                            b
-                        } else {
-                            bounds
-                        }
-                    } else {
-                        let b = detect_content_bounds(&work_data, work_width, work_height, 4);
-                        self.cached_content_bounds = Some(b);
-                        b
-                    };
-
-                // Full screenshot: save game content area (after title bar + black bar removal)
-                {
-                    let mut flag = self.debug_state.should_full_screenshot.lock().unwrap();
-                    if *flag {
-                        *flag = false;
-                        let debug_output_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                            .parent()
-                            .unwrap()
-                            .join("output");
-                        let _ = std::fs::create_dir_all(&debug_output_dir);
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap();
-                        let secs = now.as_secs();
-                        let millis = now.subsec_millis();
-                        let h = (secs / 3600) % 24;
-                        let m = (secs / 60) % 60;
-                        let s = secs % 60;
-                        let path = debug_output_dir.join(format!(
-                            "full_screenshot_{:02}{:02}{:02}_{:03}.png",
-                            h, m, s, millis
-                        ));
-                        // Extract content area (RGBA → RGB) using work_data with stride = work_width
-                        let mut rgb =
-                            Vec::with_capacity((content_width * content_height * 3) as usize);
-                        for y in 0..content_height {
-                            let row_start = (y * work_width) as usize * 4;
-                            let row_end = row_start + content_width as usize * 4;
-                            if row_end <= work_data.len() {
-                                for chunk in work_data[row_start..row_end].chunks_exact(4) {
-                                    rgb.extend_from_slice(&chunk[0..3]);
-                                }
-                            }
-                        }
-                        if let Some(img) = image::ImageBuffer::<image::Rgb<u8>, Vec<u8>>::from_raw(
-                            content_width,
-                            content_height,
-                            rgb,
-                        ) {
-                            let _ = img.save(&path);
-                            println!("Full screenshot saved to {:?}", path);
-                        }
-                    }
-                }
-
-                // Timer ROI screenshot: extract timer region directly from current frame
-                {
-                    let mut flag = self.debug_state.should_screenshot.lock().unwrap();
-                    if *flag {
-                        *flag = false;
-                        let debug_output_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                            .parent()
-                            .unwrap()
-                            .join("output");
-                        let _ = std::fs::create_dir_all(&debug_output_dir);
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap();
-                        let secs = now.as_secs();
-                        let millis = now.subsec_millis();
-                        let h = (secs / 3600) % 24;
-                        let m = (secs / 60) % 60;
-                        let s = secs % 60;
-                        let path = debug_output_dir.join(format!(
-                            "timer_roi_{:02}{:02}{:02}_{:03}.png",
-                            h, m, s, millis
-                        ));
-                        // Extract timer ROI (85.49%-93.52%, 3.60%-6.51%) from work_data
-                        let tx_start = (content_width as f32 * 0.8549) as u32;
-                        let tx_end = (content_width as f32 * 0.9352) as u32;
-                        let ty_start = (content_height as f32 * 0.0360) as u32;
-                        let ty_end = (content_height as f32 * 0.0651) as u32;
-                        let tw = tx_end.saturating_sub(tx_start);
-                        let th = ty_end.saturating_sub(ty_start);
-                        if tw > 0 && th > 0 {
-                            let mut timer_rgb = Vec::with_capacity((tw * th * 3) as usize);
-                            for y in ty_start..ty_end {
-                                let row_start = (y * work_width + tx_start) as usize * 4;
-                                let row_end = (y * work_width + tx_end) as usize * 4;
-                                if row_end <= work_data.len() {
-                                    for chunk in work_data[row_start..row_end].chunks_exact(4) {
-                                        timer_rgb.extend_from_slice(&chunk[0..3]);
-                                    }
-                                }
-                            }
-                            // Apply normalize + skew correction
-                            let (norm, norm_w, norm_h) =
-                                crate::core::countdown_monitor::normalize_roi(&timer_rgb, tw, th);
-                            let (skewed, skew_w, skew_h) =
-                                crate::core::countdown_monitor::apply_skew_correction(
-                                    &norm,
-                                    norm_w,
-                                    norm_h,
-                                    crate::core::countdown_monitor::SKEW_FACTOR,
-                                );
-                            if let Some(img) =
-                                image::ImageBuffer::<image::Rgb<u8>, Vec<u8>>::from_raw(
-                                    skew_w, skew_h, skewed,
-                                )
-                            {
-                                let _ = img.save(&path);
-                                println!("Timer ROI saved to {:?}", path);
-                            }
-                        }
-                    }
-                }
-
-                // OPTIMIZATION: Copy Header Strip (Timer + Pause Button)
-                // Timer ROI: x 85.49%-100%, y 3.60%-6.51%
-                // ROI percentages are content-relative (excluding black bars)
-                let roi_x_start = (content_width as f32 * 0.8549) as u32;
-                let roi_x_end = content_width; // 100% of content
-                let roi_y_start = (content_height as f32 * 0.0360) as u32;
-                let roi_y_end = (content_height as f32 * 0.0651) as u32;
-
-                let roi_width = roi_x_end.saturating_sub(roi_x_start);
-                let roi_height = roi_y_end.saturating_sub(roi_y_start);
-
-                // Cost Gauge ROI (content-relative)
-                // Content-relative: x=64.49%..89.61%, y=94.68%..96.97%
-                let cost_x_start = (content_width as f32 * 0.6449) as u32;
-                let cost_x_end = (content_width as f32 * 0.8961) as u32;
-                let cost_y_start = (content_height as f32 * 0.9468) as u32;
-                let cost_y_end = (content_height as f32 * 0.9697) as u32;
-
-                let cost_roi_width = cost_x_end.saturating_sub(cost_x_start);
-                let cost_roi_height = cost_y_end.saturating_sub(cost_y_start);
-
-                if roi_width > 0 && roi_height > 0 {
-                    let pixel_count = (roi_width * roi_height) as usize;
-                    let mut rgb_data = Vec::with_capacity(pixel_count * 3);
-
-                    // Extract only ROI pixels (stride = work_width, no padding)
-                    for y in roi_y_start..roi_y_end {
-                        let row_start = (y * work_width + roi_x_start) as usize * 4;
-                        let row_end = (y * work_width + roi_x_end) as usize * 4;
-                        if row_end <= work_data.len() {
-                            for chunk in work_data[row_start..row_end].chunks_exact(4) {
-                                rgb_data.extend_from_slice(&chunk[0..3]);
-                            }
-                        }
-                    }
-
-                    // Extract Cost Gauge ROI
-                    let mut cost_rgb_data = Vec::new();
-                    if cost_roi_width > 0 && cost_roi_height > 0 {
-                        let cost_pixel_count = (cost_roi_width * cost_roi_height) as usize;
-                        cost_rgb_data.reserve(cost_pixel_count * 3);
-                        for y in cost_y_start..cost_y_end {
-                            let row_start = (y * work_width + cost_x_start) as usize * 4;
-                            let row_end = (y * work_width + cost_x_end) as usize * 4;
-                            if row_end <= work_data.len() {
-                                for chunk in work_data[row_start..row_end].chunks_exact(4) {
-                                    cost_rgb_data.extend_from_slice(&chunk[0..3]);
-                                }
-                            }
-                        }
-                    }
-
-                    // Sample center brightness for Paused/Slow state detection
-                    // Uses content dimensions for center point, work_width for stride
-                    let center_brightness = sample_center_brightness(
-                        &work_data,
-                        work_width,
-                        content_width,
-                        content_height,
-                    );
-
-                    // Extract PAUSE ROI for consumer-side NCC matching (cheap crop only)
-                    use crate::core::combat_intel::{
-                        PAUSE_ROI_X_END, PAUSE_ROI_X_START, PAUSE_ROI_Y_END, PAUSE_ROI_Y_START,
-                    };
-                    let pause_x_start = (content_width as f32 * PAUSE_ROI_X_START) as u32;
-                    let pause_x_end = (content_width as f32 * PAUSE_ROI_X_END) as u32;
-                    let pause_y_start = (content_height as f32 * PAUSE_ROI_Y_START) as u32;
-                    let pause_y_end = (content_height as f32 * PAUSE_ROI_Y_END) as u32;
-                    let pause_roi_width = pause_x_end.saturating_sub(pause_x_start);
-                    let pause_roi_height = pause_y_end.saturating_sub(pause_y_start);
-
-                    let mut pause_roi_rgba =
-                        Vec::with_capacity((pause_roi_width * pause_roi_height * 4) as usize);
-                    for y in pause_y_start..pause_y_end {
-                        let src_start = (y * work_width + pause_x_start) as usize * 4;
-                        let src_end = (y * work_width + pause_x_end) as usize * 4;
-                        if src_end <= work_data.len() {
-                            pause_roi_rgba.extend_from_slice(&work_data[src_start..src_end]);
-                        }
-                    }
-
-                    let payload = CapturePayload {
-                        rgb_data,
-                        roi_width,
-                        roi_height,
-                        cost_rgb_data,
-                        cost_roi_width,
-                        cost_roi_height,
-                        client_x: client_point.x,
-                        client_y: client_point.y,
-                        client_width: content_width,
-                        client_height: content_height,
-                        center_brightness,
-                        pause_roi_rgba,
-                        pause_roi_width,
-                        pause_roi_height,
-                    };
-
-                    // Conflating Push: Overwrite any pending frame with the latest one
-                    let (lock, cvar) = &*self.latest_frame;
-                    let mut guard = lock.lock().unwrap();
-                    if guard.is_some() {
-                        self.fps_queue_full += 1; // Worker was busy, frame overwritten
-                    }
-                    *guard = Some(payload);
-                    cvar.notify_one();
-                }
-            } else {
-                eprintln!("Failed to get nopadding buffer");
-            }
-        } else {
+        let Ok(mut buffer) = frame.buffer() else {
             eprintln!("Failed to capture buffer");
+            return Ok(());
+        };
+        let frame_width = buffer.width();
+        let frame_height = buffer.height();
+
+        if !self.first_crop_logged {
+            self.first_crop_logged = true;
+            let dwm_rect = area.frame.unwrap_or_default();
+            println!(
+                "[Crop Debug] frame={}x{}, dwm=({},{},{},{}), client_pt=({},{}), client={}x{}, offset=({},{})",
+                frame_width, frame_height,
+                dwm_rect.left, dwm_rect.top, dwm_rect.right, dwm_rect.bottom,
+                area.origin.x, area.origin.y,
+                client_width, client_height,
+                offset_x, offset_y,
+            );
+        }
+
+        let Ok(packed_slice) = buffer.as_nopadding_buffer() else {
+            eprintln!("Failed to get nopadding buffer");
+            return Ok(());
+        };
+        let (work_data, work_width, work_height) = crop_client(
+            &mut self.crop_buffer,
+            packed_slice,
+            (frame_width, frame_height),
+            (offset_x, offset_y),
+            (client_width, client_height),
+        );
+
+        // Detect content bounds (exclude black bars from game rendering)
+        // Cached: recompute every 150 frames (~5s) since black bars are static
+        self.content_bounds_counter += 1;
+        let (content_width, content_height) = match self.cached_content_bounds {
+            Some(bounds) if !self.content_bounds_counter.is_multiple_of(150) => bounds,
+            _ => {
+                let bounds = detect_content_bounds(work_data, work_width, work_height, 4);
+                self.cached_content_bounds = Some(bounds);
+                bounds
+            }
+        };
+
+        if self
+            .debug_state
+            .should_full_screenshot
+            .swap(false, Ordering::Relaxed)
+        {
+            let content = Region {
+                left: 0,
+                right: content_width,
+                top: 0,
+                bottom: content_height,
+            };
+            save_full_screenshot(work_data, work_width, content);
+        }
+        if self
+            .debug_state
+            .should_screenshot
+            .swap(false, Ordering::Relaxed)
+        {
+            save_timer_roi(work_data, work_width, (content_width, content_height));
+        }
+
+        let content_size = (content_width, content_height);
+        if let Some(payload) = build_payload(work_data, work_width, content_size, area.origin) {
+            // Conflating Push: Overwrite any pending frame with the latest one
+            let (lock, cvar) = &*self.latest_frame;
+            let mut guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
+            if guard.is_some() {
+                self.fps_queue_full += 1; // Worker was busy, frame overwritten
+            }
+            *guard = Some(payload);
+            cvar.notify_one();
         }
 
         Ok(())
@@ -847,9 +870,9 @@ pub fn sample_center_brightness(
             let sy = cy.saturating_sub(5) + dy;
             let idx = ((sy * stride_width + sx) * 4) as usize;
             if idx + 2 < rgba_data.len() {
-                br_sum += (299 * rgba_data[idx] as u64
-                    + 587 * rgba_data[idx + 1] as u64
-                    + 114 * rgba_data[idx + 2] as u64)
+                br_sum += (299 * u64::from(rgba_data[idx])
+                    + 587 * u64::from(rgba_data[idx + 1])
+                    + 114 * u64::from(rgba_data[idx + 2]))
                     / 1000;
                 br_count += 1;
             }
@@ -863,7 +886,7 @@ pub fn sample_center_brightness(
 }
 
 pub fn start_capture(
-    app_handle: AppHandle,
+    app_handle: &AppHandle,
     hwnd: usize,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let manager = app_handle.state::<InterceptorManager>();
@@ -925,8 +948,7 @@ mod tests {
         let brightness = sample_center_brightness(&data, 100, 100, 100);
         assert!(
             (brightness - 255.0).abs() < 1.0,
-            "Expected ~255, got {}",
-            brightness
+            "Expected ~255, got {brightness}"
         );
     }
 
@@ -937,8 +959,7 @@ mod tests {
         let brightness = sample_center_brightness(&data, 100, 100, 100);
         assert!(
             (brightness - 0.0).abs() < 0.01,
-            "Expected ~0, got {}",
-            brightness
+            "Expected ~0, got {brightness}"
         );
     }
 
@@ -949,15 +970,17 @@ mod tests {
         let brightness = sample_center_brightness(&data, 100, 100, 100);
         assert!(
             (brightness - 128.0).abs() < 1.0,
-            "Expected ~128, got {}",
-            brightness
+            "Expected ~128, got {brightness}"
         );
     }
 
     #[test]
     fn test_sample_center_brightness_empty() {
         let brightness = sample_center_brightness(&[], 0, 0, 0);
-        assert_eq!(brightness, 0.0);
+        assert!(
+            brightness.abs() < f32::EPSILON,
+            "Expected 0, got {brightness}"
+        );
     }
 
     #[test]
@@ -966,7 +989,7 @@ mod tests {
         let data = make_rgba_frame(5, 5, 200, 200, 200);
         let brightness = sample_center_brightness(&data, 5, 5, 5);
         // Should still return a value (partial sampling)
-        assert!(brightness > 100.0, "Expected >100, got {}", brightness);
+        assert!(brightness > 100.0, "Expected >100, got {brightness}");
     }
 
     #[test]
@@ -983,10 +1006,9 @@ mod tests {
         ];
 
         for filename in images {
-            let path = format!("{}/tests/fixtures/screenshots/{}", manifest_dir, filename);
-            let img = match image::open(&path) {
-                Ok(img) => img,
-                Err(_) => continue,
+            let path = format!("{manifest_dir}/tests/fixtures/screenshots/{filename}");
+            let Ok(img) = image::open(&path) else {
+                continue;
             };
             let rgb_img = img.to_rgb8();
             let (width, height) = rgb_img.dimensions();
@@ -1000,11 +1022,11 @@ mod tests {
                 let mut all_black = true;
                 for y in 0..height {
                     let idx = ((y * width + x) * 3) as usize;
-                    if idx + 2 < rgb_data.len() {
-                        if rgb_data[idx] > 10 || rgb_data[idx + 1] > 10 || rgb_data[idx + 2] > 10 {
-                            all_black = false;
-                            break;
-                        }
+                    if idx + 2 < rgb_data.len()
+                        && (rgb_data[idx] > 10 || rgb_data[idx + 1] > 10 || rgb_data[idx + 2] > 10)
+                    {
+                        all_black = false;
+                        break;
                     }
                 }
                 if all_black {
@@ -1020,11 +1042,11 @@ mod tests {
                 let mut all_black = true;
                 for x in 0..width {
                     let idx = ((y * width + x) * 3) as usize;
-                    if idx + 2 < rgb_data.len() {
-                        if rgb_data[idx] > 10 || rgb_data[idx + 1] > 10 || rgb_data[idx + 2] > 10 {
-                            all_black = false;
-                            break;
-                        }
+                    if idx + 2 < rgb_data.len()
+                        && (rgb_data[idx] > 10 || rgb_data[idx + 1] > 10 || rgb_data[idx + 2] > 10)
+                    {
+                        all_black = false;
+                        break;
                     }
                 }
                 if all_black {

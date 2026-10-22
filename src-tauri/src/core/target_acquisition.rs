@@ -17,8 +17,10 @@ pub struct ProcessCandidate {
 
 pub fn scan_processes() -> Vec<ProcessCandidate> {
     let mut candidates = Vec::new();
-    let candidates_ptr = &mut candidates as *mut Vec<ProcessCandidate>;
+    let candidates_ptr = &raw mut candidates;
 
+    // SAFETY: `enum_windows_proc` reads the LPARAM as this `Vec`, which outlives the synchronous
+    // EnumWindows call and is used by nothing else meanwhile.
     unsafe {
         let _ = EnumWindows(Some(enum_windows_proc), LPARAM(candidates_ptr as isize));
     }
@@ -41,7 +43,7 @@ unsafe extern "system" fn enum_windows_proc(hwnd: HWND, lparam: LPARAM) -> BOOL 
     let window_title = String::from_utf16_lossy(&buffer[..length as usize]);
 
     let mut pid = 0;
-    GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    GetWindowThreadProcessId(hwnd, Some(&raw mut pid));
 
     // Open process to get name
     // Use PROCESS_QUERY_LIMITED_INFORMATION for better compatibility (e.g. anti-cheat, exalted privs)
@@ -53,12 +55,14 @@ unsafe extern "system" fn enum_windows_proc(hwnd: HWND, lparam: LPARAM) -> BOOL 
         let mut module_name = [0u16; 1024];
         let mut size = module_name.len() as u32;
         // QueryFullProcessImageNameW works with PROCESS_QUERY_LIMITED_INFORMATION
+        // SAFETY: `handle` was just opened and is closed after this block; `module_name` and `size`
+        // describe the same writable buffer, and only the `size` characters written are read back.
         unsafe {
             if QueryFullProcessImageNameW(
                 handle,
                 PROCESS_NAME_FORMAT(0),
                 windows::core::PWSTR::from_raw(module_name.as_mut_ptr()),
-                &mut size,
+                &raw mut size,
             )
             .is_ok()
             {

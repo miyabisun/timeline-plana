@@ -8,9 +8,9 @@
 //! # Algorithm
 //! 1. Apply skew correction to straighten parallelogram cost boxes
 //! 2. Build blue + filled profiles — per-column pixel ratio for dual-signal classification
-//! 3. Compute even grid from known max_cost — pitch = ROI width / max_cost
+//! 3. Compute even grid from known `max_cost` — pitch = ROI width / `max_cost`
 //! 4. Classify each box — Full/Partial/Empty using dual-signal (blue + filled)
-//! 5. Calculate cost — full_count + partial_ratio = decimal cost value
+//! 5. Calculate cost — `full_count` + `partial_ratio` = decimal cost value
 
 /// Cost gauge reading result.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -28,21 +28,21 @@ pub struct CostValue {
 /// Blue Archive cost boxes use a saturated blue/cyan tone.
 #[inline]
 fn is_blue_pixel(r: u8, g: u8, b: u8) -> bool {
-    let b_i = b as i32;
-    let r_i = r as i32;
-    let g_i = g as i32;
+    let b_i = i32::from(b);
+    let r_i = i32::from(r);
+    let g_i = i32::from(g);
     b_i > 120 && b_i > r_i + 30 && b_i > g_i
 }
 
 /// Check if a pixel belongs to a "filled" cost box across all battle states.
 ///
-/// Broader than is_blue_pixel: catches both bright blue (active) and dark teal (pause/slow).
+/// Broader than `is_blue_pixel`: catches both bright blue (active) and dark teal (pause/slow).
 /// Must exclude empty-box dark purple (R≈30, G≈40, B≈70) which also has B>R.
 #[inline]
 fn is_filled_pixel(r: u8, g: u8, b: u8) -> bool {
-    let b_i = b as i32;
-    let r_i = r as i32;
-    let g_i = g as i32;
+    let b_i = i32::from(b);
+    let r_i = i32::from(r);
+    let g_i = i32::from(g);
     // Blue must be clearly dominant and bright enough
     b_i > 70 && b_i > r_i + 20 && b_i > g_i + 10
         && r < 160
@@ -53,8 +53,8 @@ fn is_filled_pixel(r: u8, g: u8, b: u8) -> bool {
 /// Check if a pixel is part of the cyan "glow" flash effect.
 ///
 /// When a cost box fills up (e.g. 5.9→6.0), the newly-full box briefly flashes
-/// bright cyan (R≈10-90, G≈255, B≈255). These pixels fail both is_blue_pixel
-/// (B not > G) and is_filled_pixel (B not > G+10) due to G ≈ B.
+/// bright cyan (R≈10-90, G≈255, B≈255). These pixels fail both `is_blue_pixel`
+/// (B not > G) and `is_filled_pixel` (B not > G+10) due to G ≈ B.
 #[inline]
 fn is_glow_pixel(r: u8, g: u8, b: u8) -> bool {
     g >= 250 && b >= 250 && r < 160
@@ -64,7 +64,7 @@ fn is_glow_pixel(r: u8, g: u8, b: u8) -> bool {
 ///
 /// The cost boxes are parallelograms leaning right (top-right sticks out).
 /// We apply a horizontal shear to straighten them into rectangles:
-/// shift = skew_factor * y
+/// shift = `skew_factor` * y
 /// This moves bottom rows RIGHT, top rows stay, effectively undoing the lean.
 pub const COST_SKEW_FACTOR: f32 = 0.175;
 
@@ -119,10 +119,10 @@ fn build_blue_profile(rgb_data: &[u8], width: u32, height: u32) -> Vec<f32> {
         let mut blue_count = 0u32;
         for y in y_start..y_end {
             let idx = ((y * width + x) * 3) as usize;
-            if idx + 2 < rgb_data.len() {
-                if is_blue_pixel(rgb_data[idx], rgb_data[idx + 1], rgb_data[idx + 2]) {
-                    blue_count += 1;
-                }
+            if idx + 2 < rgb_data.len()
+                && is_blue_pixel(rgb_data[idx], rgb_data[idx + 1], rgb_data[idx + 2])
+            {
+                blue_count += 1;
             }
         }
         profile.push(blue_count as f32 / band_height as f32);
@@ -143,10 +143,10 @@ fn build_glow_profile(rgb_data: &[u8], width: u32, height: u32) -> Vec<f32> {
         let mut count = 0u32;
         for y in y_start..y_end {
             let idx = ((y * width + x) * 3) as usize;
-            if idx + 2 < rgb_data.len() {
-                if is_glow_pixel(rgb_data[idx], rgb_data[idx + 1], rgb_data[idx + 2]) {
-                    count += 1;
-                }
+            if idx + 2 < rgb_data.len()
+                && is_glow_pixel(rgb_data[idx], rgb_data[idx + 1], rgb_data[idx + 2])
+            {
+                count += 1;
             }
         }
         profile.push(count as f32 / band_height as f32);
@@ -157,7 +157,7 @@ fn build_glow_profile(rgb_data: &[u8], width: u32, height: u32) -> Vec<f32> {
 
 /// Build a per-column filled pixel ratio profile using the broad filled-pixel detector.
 ///
-/// Unlike build_blue_profile which only catches active-state blue, this catches
+/// Unlike `build_blue_profile` which only catches active-state blue, this catches
 /// filled boxes across active/pause/slow states.
 fn build_filled_profile(rgb_data: &[u8], width: u32, height: u32) -> Vec<f32> {
     let y_start = (height as f32 * 0.30) as u32;
@@ -170,10 +170,10 @@ fn build_filled_profile(rgb_data: &[u8], width: u32, height: u32) -> Vec<f32> {
         let mut count = 0u32;
         for y in y_start..y_end {
             let idx = ((y * width + x) * 3) as usize;
-            if idx + 2 < rgb_data.len() {
-                if is_filled_pixel(rgb_data[idx], rgb_data[idx + 1], rgb_data[idx + 2]) {
-                    count += 1;
-                }
+            if idx + 2 < rgb_data.len()
+                && is_filled_pixel(rgb_data[idx], rgb_data[idx + 1], rgb_data[idx + 2])
+            {
+                count += 1;
             }
         }
         profile.push(count as f32 / band_height as f32);
@@ -184,8 +184,8 @@ fn build_filled_profile(rgb_data: &[u8], width: u32, height: u32) -> Vec<f32> {
 
 /// Classify a box region using both filled and blue profiles.
 ///
-/// Uses the broad filled_profile as primary signal (works across all battle states),
-/// with blue_profile as a high-confidence secondary signal.
+/// Uses the broad `filled_profile` as primary signal (works across all battle states),
+/// with `blue_profile` as a high-confidence secondary signal.
 fn classify_box_broad(filled_profile: &[f32], blue_profile: &[f32], start: u32, end: u32) -> f32 {
     if start > end {
         return 0.0;
@@ -344,9 +344,9 @@ mod tests {
 
     fn load_test_image(filename: &str) -> (Vec<u8>, u32, u32) {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let path = format!("{}/tests/fixtures/screenshots/{}", manifest_dir, filename);
-        let img = image::open(&path)
-            .unwrap_or_else(|e| panic!("Failed to load test image {}: {}", path, e));
+        let path = format!("{manifest_dir}/tests/fixtures/screenshots/{filename}");
+        let img =
+            image::open(&path).unwrap_or_else(|e| panic!("Failed to load test image {path}: {e}"));
         let rgb_img = img.to_rgb8();
         let (width, height) = rgb_img.dimensions();
         let rgb_data = rgb_img.into_raw();
@@ -397,7 +397,7 @@ mod tests {
         let (roi_data, roi_w, roi_h) = extract_cost_roi(&rgb_data, width, height);
 
         let result = read_cost_gauge(&roi_data, roi_w, roi_h, 10);
-        println!("Cost result: {:?}", result);
+        println!("Cost result: {result:?}");
 
         assert!(
             result.is_some(),
@@ -423,7 +423,7 @@ mod tests {
         let (roi_data, roi_w, roi_h) = extract_cost_roi(&rgb_data, width, height);
 
         let result = read_cost_gauge(&roi_data, roi_w, roi_h, 10);
-        println!("Pause cost result: {:?}", result);
+        println!("Pause cost result: {result:?}");
 
         assert!(
             result.is_some(),
@@ -444,7 +444,7 @@ mod tests {
         let (roi_data, roi_w, roi_h) = extract_cost_roi(&rgb_data, width, height);
 
         let result = read_cost_gauge(&roi_data, roi_w, roi_h, 10);
-        println!("Slow cost result: {:?}", result);
+        println!("Slow cost result: {result:?}");
 
         assert!(
             result.is_some(),
@@ -554,7 +554,7 @@ mod tests {
         let height = 3u32;
         let mut rgb_data = vec![0u8; (width * height * 3) as usize];
         // Mark pixel at (0, 2) = bottom-left with distinctive color
-        let idx = ((2 * width + 0) * 3) as usize;
+        let idx = ((2 * width) * 3) as usize;
         rgb_data[idx] = 255; // R
         rgb_data[idx + 1] = 128; // G
         rgb_data[idx + 2] = 64; // B
@@ -584,7 +584,7 @@ mod tests {
         assert_eq!(profile.len(), width as usize);
         // All columns should have ratio 1.0 in the central band
         for &val in &profile {
-            assert!((val - 1.0).abs() < 0.01, "Expected ~1.0, got {}", val);
+            assert!((val - 1.0).abs() < 0.01, "Expected ~1.0, got {val}");
         }
     }
 
@@ -598,7 +598,7 @@ mod tests {
         let profile = build_blue_profile(&rgb_data, width, height);
 
         for &val in &profile {
-            assert!(val < 0.01, "Expected ~0.0, got {}", val);
+            assert!(val < 0.01, "Expected ~0.0, got {val}");
         }
     }
 
@@ -622,22 +622,12 @@ mod tests {
 
         assert_eq!(profile.len(), width as usize);
         // Left half should be high
-        for x in 0..5 {
-            assert!(
-                profile[x] > 0.9,
-                "Column {} should be glow, got {}",
-                x,
-                profile[x]
-            );
+        for (x, glow) in profile.iter().enumerate().take(5) {
+            assert!(*glow > 0.9, "Column {x} should be glow, got {glow}");
         }
         // Right half should be zero
-        for x in 5..10 {
-            assert!(
-                profile[x] < 0.01,
-                "Column {} should be empty, got {}",
-                x,
-                profile[x]
-            );
+        for (x, glow) in profile.iter().enumerate().skip(5) {
+            assert!(*glow < 0.01, "Column {x} should be empty, got {glow}");
         }
     }
 
@@ -660,21 +650,11 @@ mod tests {
         let profile = build_filled_profile(&rgb_data, width, height);
 
         assert_eq!(profile.len(), width as usize);
-        for x in 0..5 {
-            assert!(
-                profile[x] > 0.9,
-                "Column {} should be filled, got {}",
-                x,
-                profile[x]
-            );
+        for (x, filled) in profile.iter().enumerate().take(5) {
+            assert!(*filled > 0.9, "Column {x} should be filled, got {filled}");
         }
-        for x in 5..10 {
-            assert!(
-                profile[x] < 0.01,
-                "Column {} should be empty, got {}",
-                x,
-                profile[x]
-            );
+        for (x, filled) in profile.iter().enumerate().skip(5) {
+            assert!(*filled < 0.01, "Column {x} should be empty, got {filled}");
         }
     }
 
@@ -686,14 +666,19 @@ mod tests {
     fn test_classify_box_broad_full() {
         let blue = vec![0.9, 0.95, 0.88, 0.92, 0.90];
         let filled = vec![0.9, 0.95, 0.88, 0.92, 0.90];
-        assert_eq!(classify_box_broad(&filled, &blue, 0, 4), 1.0);
+        let fill = classify_box_broad(&filled, &blue, 0, 4);
+        assert!(
+            (fill - 1.0).abs() < f32::EPSILON,
+            "Expected full, got {fill}"
+        );
     }
 
     #[test]
     fn test_classify_box_broad_empty() {
         let blue = vec![0.0, 0.01, 0.0, 0.02, 0.0];
         let filled = vec![0.01, 0.0, 0.02, 0.01, 0.0];
-        assert_eq!(classify_box_broad(&filled, &blue, 0, 4), 0.0);
+        let fill = classify_box_broad(&filled, &blue, 0, 4);
+        assert!(fill.abs() < f32::EPSILON, "Expected empty, got {fill}");
     }
 
     #[test]
@@ -701,7 +686,7 @@ mod tests {
         let blue = vec![0.8, 0.7, 0.3, 0.02, 0.01];
         let filled = vec![0.8, 0.7, 0.3, 0.02, 0.01];
         let fill = classify_box_broad(&filled, &blue, 0, 4);
-        assert!(fill > 0.0 && fill < 1.0, "Partial fill: {}", fill);
+        assert!(fill > 0.0 && fill < 1.0, "Partial fill: {fill}");
     }
 
     #[test]
@@ -709,7 +694,11 @@ mod tests {
         // Pause/slow: high filled, zero blue → should be full
         let blue = vec![0.0, 0.0, 0.0, 0.0, 0.0];
         let filled = vec![0.9, 0.92, 0.88, 0.91, 0.90];
-        assert_eq!(classify_box_broad(&filled, &blue, 0, 4), 1.0);
+        let fill = classify_box_broad(&filled, &blue, 0, 4);
+        assert!(
+            (fill - 1.0).abs() < f32::EPSILON,
+            "Expected full, got {fill}"
+        );
     }
 
     #[test]
@@ -718,14 +707,15 @@ mod tests {
         let blue = vec![0.0, 0.0, 0.0, 0.0, 0.0];
         let filled = vec![0.5, 0.4, 0.3, 0.0, 0.0];
         let fill = classify_box_broad(&filled, &blue, 0, 4);
-        assert!(fill > 0.0 && fill < 1.0, "Expected partial, got {}", fill);
+        assert!(fill > 0.0 && fill < 1.0, "Expected partial, got {fill}");
     }
 
     #[test]
     fn test_classify_box_broad_start_gt_end() {
         let blue = vec![0.9; 5];
         let filled = vec![0.9; 5];
-        assert_eq!(classify_box_broad(&filled, &blue, 4, 2), 0.0);
+        let fill = classify_box_broad(&filled, &blue, 4, 2);
+        assert!(fill.abs() < f32::EPSILON, "Expected empty, got {fill}");
     }
 
     // ====================================================================
@@ -756,14 +746,11 @@ mod tests {
         );
     }
 
-    /// Load a pre-cropped cost ROI image (already extracted, no need for extract_cost_roi).
+    /// Load a pre-cropped cost ROI image (already extracted, no need for `extract_cost_roi`).
     fn load_cost_roi_image(subdir: &str, filename: &str) -> (Vec<u8>, u32, u32) {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let path = format!(
-            "{}/tests/fixtures/resource_survey/{}/{}",
-            manifest_dir, subdir, filename
-        );
-        let img = image::open(&path).unwrap_or_else(|e| panic!("Failed to load {}: {}", path, e));
+        let path = format!("{manifest_dir}/tests/fixtures/resource_survey/{subdir}/{filename}");
+        let img = image::open(&path).unwrap_or_else(|e| panic!("Failed to load {path}: {e}"));
         let rgb_img = img.to_rgb8();
         let (width, height) = rgb_img.dimensions();
         let rgb_data = rgb_img.into_raw();
@@ -775,13 +762,13 @@ mod tests {
     // ====================================================================
 
     /// Run accuracy test on all `cost_roi_*.png` images in a subdirectory.
-    /// Returns (pass_count, fail_count).
+    /// Returns (`pass_count`, `fail_count`).
     fn run_accuracy_test(subdir: &str, tolerance: f32) -> (usize, usize) {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let dir = format!("{}/tests/fixtures/resource_survey/{}", manifest_dir, subdir);
+        let dir = format!("{manifest_dir}/tests/fixtures/resource_survey/{subdir}");
         let mut entries: Vec<(String, f32)> = std::fs::read_dir(&dir)
-            .unwrap_or_else(|e| panic!("Cannot read {}: {}", dir, e))
-            .filter_map(|e| e.ok())
+            .unwrap_or_else(|e| panic!("Cannot read {dir}: {e}"))
+            .filter_map(std::result::Result::ok)
             .filter_map(|e| {
                 let name = e.file_name().to_string_lossy().to_string();
                 let val_str = name.strip_prefix("cost_roi_")?.strip_suffix(".png")?;
@@ -806,9 +793,7 @@ mod tests {
 
         for (filename, expected) in &entries {
             let (roi_data, roi_w, roi_h) = load_cost_roi_image(subdir, filename);
-            let detected = read_cost_gauge(&roi_data, roi_w, roi_h, 10)
-                .map(|c| c.current)
-                .unwrap_or(-1.0);
+            let detected = read_cost_gauge(&roi_data, roi_w, roi_h, 10).map_or(-1.0, |c| c.current);
             let diff = (detected - expected).abs();
             let ok = diff <= tolerance;
 
@@ -841,13 +826,13 @@ mod tests {
     #[test]
     fn test_accuracy_active() {
         let (_, fail) = run_accuracy_test("active", 0.5);
-        assert_eq!(fail, 0, "{} images failed accuracy check", fail);
+        assert_eq!(fail, 0, "{fail} images failed accuracy check");
     }
 
     #[test]
     fn test_accuracy_slow() {
         let (_, fail) = run_accuracy_test("slow", 0.5);
-        assert_eq!(fail, 0, "{} images failed accuracy check", fail);
+        assert_eq!(fail, 0, "{fail} images failed accuracy check");
     }
 
     // ====================================================================
@@ -855,7 +840,7 @@ mod tests {
     // ====================================================================
 
     #[test]
-    #[ignore] // Diagnostic only: prints per-box values, no assertions
+    #[ignore = "diagnostic only: prints per-box values, no assertions"]
     fn test_diagnostic_cost_all_images() {
         let images = ["battle-active.png", "battle-pause.png", "battle-slow.png"];
 
@@ -863,7 +848,7 @@ mod tests {
             let (rgb_data, width, height) = load_test_image(img_name);
             let (roi_data, roi_w, roi_h) = extract_cost_roi(&rgb_data, width, height);
 
-            println!("\n=== {} ===", img_name);
+            println!("\n=== {img_name} ===");
 
             let (corrected, corr_w, corr_h) =
                 apply_cost_skew(&roi_data, roi_w, roi_h, COST_SKEW_FACTOR);
@@ -872,7 +857,7 @@ mod tests {
             let filled_profile = build_filled_profile(&corrected, corr_w, corr_h);
 
             let pitch = corr_w as f32 / 10.0;
-            println!("Grid: corr_w={}, pitch={:.1}", corr_w, pitch);
+            println!("Grid: corr_w={corr_w}, pitch={pitch:.1}");
 
             for i in 0..10u32 {
                 let start = (i as f32 * pitch).round() as u32;
@@ -891,13 +876,12 @@ mod tests {
                 let classification = classify_box_broad(&filled_profile, &blue_profile, start, end);
 
                 println!(
-                    "  Box {}: cols {}-{} | blue={:.3} filled={:.3} class={:.2}",
-                    i, start, end, blue_avg, fill_avg, classification
+                    "  Box {i}: cols {start}-{end} | blue={blue_avg:.3} filled={fill_avg:.3} class={classification:.2}"
                 );
             }
 
             let result = read_cost_gauge(&roi_data, roi_w, roi_h, 10);
-            println!("  Result: {:?}", result);
+            println!("  Result: {result:?}");
         }
     }
 
@@ -913,18 +897,12 @@ mod tests {
         for filename in images {
             let (rgb_data, width, height) = load_test_image(filename);
             let (roi_data, roi_w, roi_h) = extract_cost_roi(&rgb_data, width, height);
-            println!(
-                "{} (content={}x{}, cost_roi={}x{})",
-                filename, width, height, roi_w, roi_h
-            );
+            println!("{filename} (content={width}x{height}, cost_roi={roi_w}x{roi_h})");
 
             let result = read_cost_gauge(&roi_data, roi_w, roi_h, 10);
             assert!(
                 result.is_some(),
-                "{}: cost gauge returned None (roi={}x{})",
-                filename,
-                roi_w,
-                roi_h
+                "{filename}: cost gauge returned None (roi={roi_w}x{roi_h})"
             );
             let cost = result.unwrap();
             println!(

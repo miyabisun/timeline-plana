@@ -189,7 +189,7 @@ pub fn normalize_roi(rgb_data: &[u8], width: u32, height: u32) -> (Vec<u8>, u32,
 /// Apply skew correction to straighten italic text
 ///
 /// Uses horizontal shear transformation:
-/// x' = x + skew_factor * (height - y)
+/// x' = x + `skew_factor` * (height - y)
 ///
 /// This shifts pixels horizontally based on their vertical position,
 /// effectively rotating italic text to be vertical.
@@ -301,12 +301,17 @@ impl TimerValue {
 
     /// Convert to total milliseconds
     pub fn to_millis(&self) -> u32 {
-        (self.minutes as u32 * 60_000) + (self.seconds as u32 * 1000) + (self.milliseconds as u32)
+        (u32::from(self.minutes) * 60_000)
+            + (u32::from(self.seconds) * 1000)
+            + u32::from(self.milliseconds)
     }
+}
 
-    /// Format as string "MM:SS.mmm"
-    pub fn to_string(&self) -> String {
-        format!(
+/// Formats as "MM:SS.mmm".
+impl std::fmt::Display for TimerValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
             "{:02}:{:02}.{:03}",
             self.minutes, self.seconds, self.milliseconds
         )
@@ -330,7 +335,8 @@ pub fn calculate_adaptive_threshold(rgb_data: &[u8], width: u32, height: u32) ->
                 let r = rgb_data[idx];
                 let g = rgb_data[idx + 1];
                 let b = rgb_data[idx + 2];
-                let lum = (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32) as u8;
+                let lum =
+                    (0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b)) as u8;
                 luminances.push(lum);
             }
         }
@@ -366,7 +372,8 @@ pub fn binarize_adaptive(rgb_data: &[u8], width: u32, height: u32, threshold: u8
                 let b = rgb_data[idx + 2];
 
                 // Luminance formula (weighted for human perception)
-                let lum = (0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32) as u8;
+                let lum =
+                    (0.299 * f32::from(r) + 0.587 * f32::from(g) + 0.114 * f32::from(b)) as u8;
 
                 // White text detection
                 if lum > threshold {
@@ -484,9 +491,9 @@ fn match_segment_sad(
     );
 
     let mut sad: u64 = 0;
-    let pixel_count = (template.width() * template.height()) as u64;
+    let pixel_count = u64::from(template.width() * template.height());
     for (p1, p2) in resized.pixels().zip(template.pixels()) {
-        sad += (p1.0[0] as i64 - p2.0[0] as i64).unsigned_abs();
+        sad += (i64::from(p1.0[0]) - i64::from(p2.0[0])).unsigned_abs();
     }
 
     // Normalize: 0.0 = perfect match, 1.0 = maximum difference (255 per pixel)
@@ -494,7 +501,7 @@ fn match_segment_sad(
 }
 
 /// Compute white pixel density in a sub-region of a segment.
-/// region: (x_frac_start, x_frac_end, y_frac_start, y_frac_end) as fractions 0.0-1.0
+/// region: (`x_frac_start`, `x_frac_end`, `y_frac_start`, `y_frac_end`) as fractions 0.0-1.0
 fn segment_region_density(
     binary: &[u8],
     width: u32,
@@ -527,6 +534,13 @@ fn segment_region_density(
     }
 }
 
+/// A template label and how well a segment matches it (lower scores match better).
+#[derive(Clone, Copy)]
+struct Candidate {
+    label: u8,
+    score: f32,
+}
+
 /// Disambiguate confusable digit pairs (3/8, 0/9) using regional pixel density.
 /// Returns the corrected label if disambiguation is needed, or the original label.
 fn disambiguate_digit(
@@ -535,21 +549,19 @@ fn disambiguate_digit(
     height: u32,
     x_start: u32,
     x_end: u32,
-    best_label: u8,
-    best_score: f32,
-    second_label: u8,
-    second_score: f32,
+    best: Candidate,
+    second: Candidate,
 ) -> u8 {
-    let score_diff = second_score - best_score;
+    let score_diff = second.score - best.score;
     // Only disambiguate when scores are very close
     if score_diff > 0.05 {
-        return best_label;
+        return best.label;
     }
 
-    let pair = if best_label < second_label {
-        (best_label, second_label)
+    let pair = if best.label < second.label {
+        (best.label, second.label)
     } else {
-        (second_label, best_label)
+        (second.label, best.label)
     };
 
     match pair {
@@ -588,8 +600,85 @@ fn disambiguate_digit(
                 9
             }
         }
-        _ => best_label,
+        _ => best.label,
     }
+}
+
+/// The segments that best match the colon and the dot across both template sets, and
+/// whether the colon matched the min-resolution set better.
+fn find_separators(
+    binary: &[u8],
+    width: u32,
+    height: u32,
+    segments: &[(u32, u32)],
+) -> (usize, usize, bool) {
+    let norm = get_norm_templates();
+    let min = get_min_templates();
+    let mut best_colon_idx = 0usize;
+    let mut best_colon_score = f32::MAX;
+    let mut best_colon_is_min = false;
+    let mut best_dot_idx = 0usize;
+    let mut best_dot_score = f32::MAX;
+
+    for (i, (s, e)) in segments.iter().enumerate() {
+        let nc = match_segment_sad(binary, width, height, *s, *e, &norm.colon);
+        let mc = match_segment_sad(binary, width, height, *s, *e, &min.colon);
+        let nd = match_segment_sad(binary, width, height, *s, *e, &norm.dot);
+        let md = match_segment_sad(binary, width, height, *s, *e, &min.dot);
+
+        let colon_score = nc.min(mc);
+        let is_min = mc < nc;
+        if colon_score < best_colon_score {
+            best_colon_score = colon_score;
+            best_colon_idx = i;
+            best_colon_is_min = is_min;
+        }
+
+        let dot_score = nd.min(md);
+        if dot_score < best_dot_score {
+            best_dot_score = dot_score;
+            best_dot_idx = i;
+        }
+    }
+    (best_colon_idx, best_dot_idx, best_colon_is_min)
+}
+
+/// The digit in the segment from column `s` to `e`, and the confidence of the match: the
+/// relative gap between the best and the second-best template.
+fn recognize_digit(
+    binary: &[u8],
+    width: u32,
+    height: u32,
+    (s, e): (u32, u32),
+    tmpl: &TemplateSet,
+) -> (u8, f32) {
+    let mut best = Candidate {
+        label: 255,
+        score: f32::MAX,
+    };
+    let mut second = best;
+    for (label, t) in &tmpl.digits {
+        let score = match_segment_sad(binary, width, height, s, e, t);
+        if score < best.score {
+            second = best;
+            best = Candidate {
+                label: *label,
+                score,
+            };
+        } else if score < second.score {
+            second = Candidate {
+                label: *label,
+                score,
+            };
+        }
+    }
+    let digit = disambiguate_digit(binary, width, height, s, e, best, second);
+    let conf = if second.score > 0.0 {
+        1.0 - (best.score / second.score)
+    } else {
+        0.0
+    };
+    (digit, conf)
 }
 
 // ============================================================================
@@ -628,11 +717,8 @@ pub fn recognize_timer_from_roi(rgb_data: &[u8], width: u32, height: u32) -> Opt
 /// 2. Probe both norm/min colon/dot templates to determine resolution
 /// 3. Split fields by colon/dot positions (MM:SS.mmm)
 /// 4. Recognize digits with the selected template set + disambiguation
-/// 5. Validate and return TimerValue
+/// 5. Validate and return `TimerValue`
 pub fn recognize_timer_from_binary(binary: &[u8], width: u32, height: u32) -> Option<TimerValue> {
-    let norm = get_norm_templates();
-    let min = get_min_templates();
-
     // Step 1: Segment
     let segments = find_character_columns(binary, width, height);
     if segments.len() < 5 {
@@ -640,32 +726,8 @@ pub fn recognize_timer_from_binary(binary: &[u8], width: u32, height: u32) -> Op
     }
 
     // Step 2: Find best colon and dot from both template sets
-    let mut best_colon_idx = 0usize;
-    let mut best_colon_score = f32::MAX;
-    let mut best_colon_is_min = false;
-    let mut best_dot_idx = 0usize;
-    let mut best_dot_score = f32::MAX;
-
-    for (i, (s, e)) in segments.iter().enumerate() {
-        let nc = match_segment_sad(binary, width, height, *s, *e, &norm.colon);
-        let mc = match_segment_sad(binary, width, height, *s, *e, &min.colon);
-        let nd = match_segment_sad(binary, width, height, *s, *e, &norm.dot);
-        let md = match_segment_sad(binary, width, height, *s, *e, &min.dot);
-
-        let colon_score = nc.min(mc);
-        let is_min = mc < nc;
-        if colon_score < best_colon_score {
-            best_colon_score = colon_score;
-            best_colon_idx = i;
-            best_colon_is_min = is_min;
-        }
-
-        let dot_score = nd.min(md);
-        if dot_score < best_dot_score {
-            best_dot_score = dot_score;
-            best_dot_idx = i;
-        }
-    }
+    let (best_colon_idx, best_dot_idx, best_colon_is_min) =
+        find_separators(binary, width, height, &segments);
 
     // Colon must come before dot
     if best_colon_idx >= best_dot_idx {
@@ -673,7 +735,11 @@ pub fn recognize_timer_from_binary(binary: &[u8], width: u32, height: u32) -> Op
     }
 
     // Step 3: Select template set based on separator probe
-    let tmpl = if best_colon_is_min { min } else { norm };
+    let tmpl = if best_colon_is_min {
+        get_min_templates()
+    } else {
+        get_norm_templates()
+    };
 
     // Step 4: Split into fields
     let min_segs: Vec<usize> = (0..best_colon_idx).collect();
@@ -689,42 +755,8 @@ pub fn recognize_timer_from_binary(binary: &[u8], width: u32, height: u32) -> Op
     let mut digits = Vec::new();
     let mut confidences = Vec::new();
     for &seg_i in min_segs.iter().chain(sec_segs.iter()).chain(ms_segs.iter()) {
-        let (s, e) = segments[seg_i];
-        let mut best_label = 255u8;
-        let mut best_score = f32::MAX;
-        let mut second_label = 255u8;
-        let mut second_score = f32::MAX;
-        for (lbl, t) in &tmpl.digits {
-            let score = match_segment_sad(binary, width, height, s, e, t);
-            if score < best_score {
-                second_score = best_score;
-                second_label = best_label;
-                best_score = score;
-                best_label = *lbl;
-            } else if score < second_score {
-                second_score = score;
-                second_label = *lbl;
-            }
-        }
-        let final_label = disambiguate_digit(
-            binary,
-            width,
-            height,
-            s,
-            e,
-            best_label,
-            best_score,
-            second_label,
-            second_score,
-        );
-        digits.push(final_label);
-
-        // Confidence: relative gap between best and second-best
-        let conf = if second_score > 0.0 {
-            1.0 - (best_score / second_score)
-        } else {
-            0.0
-        };
+        let (digit, conf) = recognize_digit(binary, width, height, segments[seg_i], tmpl);
+        digits.push(digit);
         confidences.push(conf);
     }
 
@@ -733,17 +765,17 @@ pub fn recognize_timer_from_binary(binary: &[u8], width: u32, height: u32) -> Op
     let sec_start = min_count;
 
     let minutes_raw: u16 = if min_count == 2 {
-        digits[0] as u16 * 10 + digits[1] as u16
+        u16::from(digits[0]) * 10 + u16::from(digits[1])
     } else {
-        digits[0] as u16
+        u16::from(digits[0])
     };
 
-    let seconds_raw: u16 = digits[sec_start] as u16 * 10 + digits[sec_start + 1] as u16;
+    let seconds_raw: u16 = u16::from(digits[sec_start]) * 10 + u16::from(digits[sec_start + 1]);
 
     let ms_start = min_count + 2; // sec_count is always 2
-    let ms_raw: u16 = digits[ms_start] as u16 * 100
-        + digits[ms_start + 1] as u16 * 10
-        + digits[ms_start + 2] as u16;
+    let ms_raw: u16 = u16::from(digits[ms_start]) * 100
+        + u16::from(digits[ms_start + 1]) * 10
+        + u16::from(digits[ms_start + 2]);
     let ms = snap_ms_to_valid(ms_raw);
 
     if minutes_raw >= 60 || seconds_raw >= 60 {
@@ -772,9 +804,9 @@ mod tests {
 
     fn load_test_image(filename: &str) -> (Vec<u8>, u32, u32) {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let path = format!("{}/tests/fixtures/screenshots/{}", manifest_dir, filename);
-        let img = image::open(&path)
-            .unwrap_or_else(|e| panic!("Failed to load test image {}: {}", path, e));
+        let path = format!("{manifest_dir}/tests/fixtures/screenshots/{filename}");
+        let img =
+            image::open(&path).unwrap_or_else(|e| panic!("Failed to load test image {path}: {e}"));
         let rgb_img = img.to_rgb8();
         let (width, height) = rgb_img.dimensions();
         let rgb_data = rgb_img.into_raw();
@@ -803,13 +835,11 @@ mod tests {
         let expected_h = ((height as f32 * 0.0651) as u32) - ((height as f32 * 0.0360) as u32);
         assert_eq!(
             crop_w, expected_w,
-            "ROI width mismatch for {}x{}",
-            width, height
+            "ROI width mismatch for {width}x{height}"
         );
         assert_eq!(
             crop_h, expected_h,
-            "ROI height mismatch for {}x{}",
-            width, height
+            "ROI height mismatch for {width}x{height}"
         );
         assert_eq!(
             cropped.len(),
@@ -833,10 +863,9 @@ mod tests {
         let expected_w = crop_w + max_shift;
         assert_eq!(
             new_w, expected_w,
-            "Expected skew-corrected width {}",
-            expected_w
+            "Expected skew-corrected width {expected_w}"
         );
-        assert_eq!(new_h, crop_h, "Height should remain {}", crop_h);
+        assert_eq!(new_h, crop_h, "Height should remain {crop_h}");
         assert_eq!(corrected.len(), (new_w * new_h * 3) as usize);
     }
 
@@ -848,7 +877,7 @@ mod tests {
             let (rgb_data, width, height) = load_test_image(img_name);
             let (processed, proc_w, proc_h) = process_timer_region(&rgb_data, width, height);
 
-            println!("{}: Processed to {}x{}", img_name, proc_w, proc_h);
+            println!("{img_name}: Processed to {proc_w}x{proc_h}");
 
             // Verify output is valid
             assert!(proc_w > 0);
@@ -908,7 +937,7 @@ mod tests {
         let total_pixels = (proc_w * proc_h) as usize;
         let white_ratio = white_count as f32 / total_pixels as f32;
 
-        println!("Binarization: {}x{}", proc_w, proc_h);
+        println!("Binarization: {proc_w}x{proc_h}");
         println!(
             "White pixels: {} / {} ({:.1}%)",
             white_count,
@@ -938,7 +967,7 @@ mod tests {
         println!("Found {} character segments:", boundaries.len());
         for (i, (start, end)) in boundaries.iter().enumerate() {
             let width = end - start + 1;
-            println!("  [{}] x={}-{} (w={})", i, start, end, width);
+            println!("  [{i}] x={start}-{end} (w={width})");
         }
 
         // Should find 7-9 segments (0M:SS.mmm - some may merge)
@@ -953,7 +982,7 @@ mod tests {
         assert_eq!(timer.minutes, 3);
         assert_eq!(timer.seconds, 41);
         assert_eq!(timer.milliseconds, 933);
-        assert_eq!(timer.to_millis(), 221933);
+        assert_eq!(timer.to_millis(), 221_933);
         assert_eq!(timer.to_string(), "03:41.933");
     }
 
@@ -969,14 +998,13 @@ mod tests {
             let (rgb_data, width, height) = load_test_image(filename);
             let result = recognize_timer(&rgb_data, width, height);
 
-            assert!(result.is_some(), "{}: OCR returned None", filename);
+            assert!(result.is_some(), "{filename}: OCR returned None");
 
             let timer = result.unwrap();
             assert_eq!(
                 timer.to_string(),
                 expected,
-                "{}: OCR result mismatch",
-                filename
+                "{filename}: OCR result mismatch"
             );
         }
     }
@@ -1008,88 +1036,97 @@ mod tests {
         let threshold = calculate_adaptive_threshold(&processed, proc_w, proc_h);
         assert!(
             threshold >= 150,
-            "High-contrast timer text should produce threshold >= 150, got {}",
-            threshold
+            "High-contrast timer text should produce threshold >= 150, got {threshold}"
         );
+    }
+
+    /// The `.png` fixtures in `tests/fixtures/countdown_monitor/<folder>`, sorted, each with
+    /// its file name without `.png`; `None` when the folder cannot be read.
+    fn fixture_pngs(folder: &str) -> Option<Vec<(std::path::PathBuf, String)>> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/countdown_monitor")
+            .join(folder);
+        let mut pngs: Vec<_> = std::fs::read_dir(dir)
+            .ok()?
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("png"))
+            })
+            .map(|path| {
+                let stem = path.file_stem().unwrap().to_str().unwrap().to_owned();
+                (path, stem)
+            })
+            .collect();
+        pngs.sort();
+        Some(pngs)
+    }
+
+    /// The three fields of a fixture named `MM-SS-mmm`, without the legacy `binary_` and
+    /// `failed_` prefixes.
+    fn name_fields(stem: &str) -> Option<[String; 3]> {
+        let content = stem.replace("binary_", "").replace("failed_", "");
+        let parts: Vec<&str> = content.split('-').collect();
+        let [minutes, seconds, millis] = parts.as_slice() else {
+            return None;
+        };
+        Some([
+            (*minutes).to_owned(),
+            (*seconds).to_owned(),
+            (*millis).to_owned(),
+        ])
+    }
+
+    /// The time a fixture's name holds (a field that does not parse reads as 0).
+    fn expected_time(stem: &str) -> Option<(u8, u8, u16)> {
+        let [minutes, seconds, millis] = name_fields(stem)?;
+        Some((
+            minutes.parse().unwrap_or(0),
+            seconds.parse().unwrap_or(0),
+            millis.parse().unwrap_or(0),
+        ))
+    }
+
+    fn is_time(timer: &TimerValue, (minutes, seconds, millis): (u8, u8, u16)) -> bool {
+        timer.minutes == minutes && timer.seconds == seconds && timer.milliseconds == millis
+    }
+
+    fn mismatch(
+        stem: &str,
+        (minutes, seconds, millis): (u8, u8, u16),
+        timer: &TimerValue,
+    ) -> String {
+        format!("{stem}.png: exp {minutes:02}:{seconds:02}.{millis:03}, got {timer}")
     }
 
     #[test]
     fn test_binary_ocr_accuracy() {
-        use std::path::PathBuf;
-
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let fixtures_dir =
-            PathBuf::from(manifest_dir).join("tests/fixtures/countdown_monitor/active");
-
-        let paths = match std::fs::read_dir(&fixtures_dir) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("Skipping test: fixtures directory not found: {}", e);
-                return;
-            }
+        let Some(fixtures) = fixture_pngs("active") else {
+            eprintln!("Skipping test: fixtures directory not found");
+            return;
         };
 
         let mut total = 0;
         let mut passed = 0;
         let mut failures = Vec::new();
 
-        for path in paths {
-            let path = path.unwrap().path();
-            let filename = path.file_name().unwrap().to_str().unwrap().to_string();
-
-            if !filename.ends_with(".png") {
-                continue;
-            }
-
+        for (path, filename) in fixtures {
             // Expected format: MM-SS-mmm.png (or legacy binary_MM-SS-mmm.png)
-            let content = filename
-                .replace("binary_", "")
-                .replace("failed_", "")
-                .replace(".png", "");
-            let parts: Vec<&str> = content.split('-').collect();
-
-            if parts.len() != 3 {
-                eprintln!("Skipping invalid filename format: {}", filename);
+            let Some(expected) = expected_time(&filename) else {
+                eprintln!("Skipping invalid filename format: {filename}.png");
                 continue;
-            }
-
-            let exp_min: u8 = parts[0].parse().unwrap_or(0);
-            let exp_sec: u8 = parts[1].parse().unwrap_or(0);
-            let exp_ms: u16 = parts[2].parse().unwrap_or(0);
+            };
 
             let img = image::open(&path).expect("Failed to open image").to_luma8();
-            let width = img.width();
-            let height = img.height();
+            let (width, height) = img.dimensions();
             let binary = img.into_vec();
 
             total += 1;
 
-            let result = recognize_timer_from_binary(&binary, width, height);
-
-            match result {
-                Some(timer) => {
-                    let matches = timer.minutes == exp_min
-                        && timer.seconds == exp_sec
-                        && timer.milliseconds == exp_ms;
-
-                    if matches {
-                        passed += 1;
-                    } else {
-                        failures.push(format!(
-                            "{}: Expected {:02}:{:02}.{:03}, Got {:02}:{:02}.{:03}",
-                            filename,
-                            exp_min,
-                            exp_sec,
-                            exp_ms,
-                            timer.minutes,
-                            timer.seconds,
-                            timer.milliseconds
-                        ));
-                    }
-                }
-                None => {
-                    failures.push(format!("{}: Failed to recognize (None)", filename));
-                }
+            match recognize_timer_from_binary(&binary, width, height) {
+                Some(timer) if is_time(&timer, expected) => passed += 1,
+                Some(timer) => failures.push(mismatch(&filename, expected, &timer)),
+                None => failures.push(format!("{filename}.png: Failed to recognize (None)")),
             }
         }
 
@@ -1105,7 +1142,7 @@ mod tests {
         if !failures.is_empty() {
             eprintln!("\nFailures:");
             for fail in &failures {
-                eprintln!("  {}", fail);
+                eprintln!("  {fail}");
             }
             panic!(
                 "OCR accuracy test failed: {}/{} failed",
@@ -1116,57 +1153,34 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Template generation tool, not a test — writes to src/core/templates/
+    #[ignore = "template generation tool, not a test: writes to src/core/templates/"]
     fn test_extract_templates() {
         use std::path::PathBuf;
 
         eprintln!("DEBUG: Starting test_extract_templates");
 
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let fixtures_dir =
-            PathBuf::from(manifest_dir).join("tests/fixtures/countdown_monitor/active");
         let templates_dir = PathBuf::from(manifest_dir).join("src/core/templates");
 
         // Create templates dir if not exists
         let _ = std::fs::create_dir_all(&templates_dir);
 
-        let paths = match std::fs::read_dir(&fixtures_dir) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("Skipping: fixtures directory not found: {}", e);
-                return;
-            }
+        let Some(fixtures) = fixture_pngs("active") else {
+            eprintln!("Skipping: fixtures directory not found");
+            return;
         };
 
         let mut counts = [0; 12]; // 0-9, 10=colon, 11=dot
 
-        for path in paths {
-            let path = path.unwrap().path();
-            let filename = path.file_name().unwrap().to_str().unwrap().to_string();
-
-            if !filename.ends_with(".png") {
-                continue;
-            }
-
+        for (path, filename) in fixtures {
             // Filename format: MM-SS-mmm.png (or legacy binary_MM-SS-mmm.png)
             // e.g. 03-41-933.png -> "03:41.933" (9 chars)
-            let content = filename
-                .replace("binary_", "")
-                .replace("failed_", "")
-                .replace(".png", "");
-            let parts: Vec<&str> = content.split('-').collect();
-
-            if parts.len() != 3 {
+            let Some([min_str, sec_str, ms_str]) = name_fields(&filename) else {
                 continue;
-            }
-
-            // Construct expected string sequence
-            let min_str = parts[0]; // "03"
-            let sec_str = parts[1]; // "41"
-            let ms_str = parts[2]; // "933"
+            };
 
             // Expected sequence of chars
-            let expected_chars = format!("{}:{}.{}", min_str, sec_str, ms_str);
+            let expected_chars = format!("{min_str}:{sec_str}.{ms_str}");
 
             let img = image::open(&path).expect("Failed to open image").to_luma8();
             let width = img.width();
@@ -1197,7 +1211,7 @@ mod tests {
 
                 // Determine label name
                 let label = match char_code {
-                    '0'..='9' => format!("{}", char_code),
+                    '0'..='9' => format!("{char_code}"),
                     ':' => "colon".to_string(),
                     '.' => "dot".to_string(),
                     _ => "unknown".to_string(),
@@ -1216,7 +1230,7 @@ mod tests {
                 // SAVE STANDARD TEMPLATE (Sample 1)
                 if count == 1 {
                     // 0.png, colon.png, dot.png
-                    let std_name = format!("{}.png", label);
+                    let std_name = format!("{label}.png");
                     let std_path = templates_dir.join(std_name);
                     image::save_buffer(
                         &std_path,
@@ -1230,7 +1244,7 @@ mod tests {
                             "Failed to save standard template {}: {}",
                             std_path.display(),
                             e
-                        )
+                        );
                     });
                 }
 
@@ -1239,12 +1253,7 @@ mod tests {
                     continue;
                 }
 
-                let out_name = format!(
-                    "{}_sample{}_{}.png",
-                    label,
-                    count,
-                    filename.replace(".png", "")
-                );
+                let out_name = format!("{label}_sample{count}_{filename}.png");
                 let out_path = templates_dir.join(out_name);
 
                 image::save_buffer(
@@ -1254,14 +1263,14 @@ mod tests {
                     height,
                     image::ColorType::L8,
                 )
-                .unwrap_or_else(|e| eprintln!("Failed to save template: {}", e));
+                .unwrap_or_else(|e| eprintln!("Failed to save template: {e}"));
             }
         }
 
         eprintln!("DEBUG: Templates extracted.");
     }
 
-    /// Load a grayscale PNG template from file path, return GrayImage
+    /// Load a grayscale PNG template from file path, return `GrayImage`
     #[allow(dead_code)] // Used by ignored tool tests
     fn load_gray_template(path: &std::path::Path) -> GrayImage {
         image::open(path)
@@ -1270,8 +1279,9 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Diagnostic tool — dumps column density and segmentation for a specific image
+    #[ignore = "diagnostic tool: dumps column density and segmentation for a specific image"]
     fn test_diagnose_segmentation() {
+        use std::fmt::Write;
         use std::path::PathBuf;
 
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
@@ -1283,13 +1293,12 @@ mod tests {
         let height = rgb_img.height();
         let rgb_data = rgb_img.into_raw();
 
-        eprintln!("Image size: {}x{}", width, height);
+        eprintln!("Image size: {width}x{height}");
 
         let binary = binarize_for_ocr(&rgb_data, width, height);
         let threshold = (height as f32 * COLUMN_THRESHOLD_RATIO) as u32;
         eprintln!(
-            "Column threshold: {} (height={}, ratio={})",
-            threshold, height, COLUMN_THRESHOLD_RATIO
+            "Column threshold: {threshold} (height={height}, ratio={COLUMN_THRESHOLD_RATIO})"
         );
 
         // Dump column densities
@@ -1302,9 +1311,9 @@ mod tests {
                     col_sum += 1;
                 }
             }
-            density_line.push_str(&format!("{:2} ", col_sum));
+            let _ = write!(density_line, "{col_sum:2} ");
         }
-        eprintln!("{}", density_line);
+        eprintln!("{density_line}");
 
         // Show threshold bar
         let mut thresh_line = String::new();
@@ -1317,7 +1326,7 @@ mod tests {
             }
             thresh_line.push_str(if col_sum > threshold { " # " } else { " . " });
         }
-        eprintln!("{}", thresh_line);
+        eprintln!("{thresh_line}");
 
         let segments = find_character_columns(&binary, width, height);
         eprintln!("\nSegments ({}): {:?}", segments.len(), segments);
@@ -1337,45 +1346,31 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Segment extraction tool — writes digit images to output/min-digits/
+    #[ignore = "segment extraction tool: writes digit images to output/min-digits/"]
     fn test_extract_min_segments() {
         use std::path::PathBuf;
 
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let fixtures_dir =
-            PathBuf::from(manifest_dir).join("tests/fixtures/countdown_monitor/min-active");
         let output_dir = PathBuf::from(manifest_dir)
             .parent()
             .unwrap()
             .join("output/min-digits");
         let _ = std::fs::create_dir_all(&output_dir);
 
-        let paths = match std::fs::read_dir(&fixtures_dir) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("Skipping: fixtures directory not found: {}", e);
-                return;
-            }
+        let Some(fixtures) = fixture_pngs("min-active") else {
+            eprintln!("Skipping: fixtures directory not found");
+            return;
         };
 
         let mut counts = [0u32; 12]; // 0-9, 10=colon, 11=dot
 
-        for path in paths {
-            let path = path.unwrap().path();
-            let filename = path.file_name().unwrap().to_str().unwrap().to_string();
-
-            if !filename.ends_with(".png") {
+        for (path, content) in fixtures {
+            let Some([minutes, seconds, millis]) = name_fields(&content) else {
                 continue;
-            }
-
-            let content = filename.replace(".png", "");
-            let parts: Vec<&str> = content.split('-').collect();
-            if parts.len() != 3 {
-                continue;
-            }
+            };
 
             // Construct expected character sequence: "03:49.733"
-            let expected_chars = format!("{}:{}.{}", parts[0], parts[1], parts[2]);
+            let expected_chars = format!("{minutes}:{seconds}.{millis}");
 
             // Load RGB image, binarize, segment
             let rgb_img = image::open(&path).expect("Failed to open image").to_rgb8();
@@ -1388,8 +1383,8 @@ mod tests {
 
             if segments.len() != expected_chars.len() {
                 eprintln!(
-                    "SKIP {}: expected {} segments, got {}",
-                    filename,
+                    "SKIP {}.png: expected {} segments, got {}",
+                    content,
                     expected_chars.len(),
                     segments.len()
                 );
@@ -1400,7 +1395,7 @@ mod tests {
                 let ch = expected_chars.chars().nth(i).unwrap();
 
                 let (label, idx) = match ch {
-                    '0'..='9' => (format!("{}", ch), ch.to_digit(10).unwrap() as usize),
+                    '0'..='9' => (format!("{ch}"), ch.to_digit(10).unwrap() as usize),
                     ':' => ("colon".to_string(), 10),
                     '.' => ("dot".to_string(), 11),
                     _ => continue,
@@ -1430,14 +1425,11 @@ mod tests {
                     height,
                     image::ColorType::L8,
                 )
-                .unwrap_or_else(|e| eprintln!("Failed to save {}: {}", out_name, e));
+                .unwrap_or_else(|e| eprintln!("Failed to save {out_name}: {e}"));
             }
         }
 
-        eprintln!(
-            "Extraction complete. Counts (0-9, colon, dot): {:?}",
-            counts
-        );
+        eprintln!("Extraction complete. Counts (0-9, colon, dot): {counts:?}");
         eprintln!("Output: output/min-digits/");
     }
 
@@ -1453,192 +1445,102 @@ mod tests {
             let (rgb_data, width, height) = load_test_image(filename);
             let result = recognize_timer(&rgb_data, width, height);
             if let Some(timer) = result {
-                println!("{} ({}x{}): {}", filename, width, height, timer.to_string());
+                println!("{filename} ({width}x{height}): {timer}");
                 assert!(
                     timer.minutes <= 59 && timer.seconds <= 59 && timer.milliseconds <= 999,
-                    "{}: invalid timer values {:?}",
-                    filename,
-                    timer
+                    "{filename}: invalid timer values {timer:?}"
                 );
                 success += 1;
             } else {
                 println!(
-                    "{} ({}x{}): OCR returned None (expected at min resolution)",
-                    filename, width, height
+                    "{filename} ({width}x{height}): OCR returned None (expected at min resolution)"
                 );
             }
         }
-        println!("Timer OCR at min resolution: {}/3 succeeded", success);
+        println!("Timer OCR at min resolution: {success}/3 succeeded");
     }
 
-    /// Unified OCR pipeline test: tests BOTH normal and min images through recognize_timer_from_binary.
+    /// Unified OCR pipeline test: tests BOTH normal and min images through `recognize_timer_from_binary`.
     #[test]
     fn test_unified_ocr_pipeline() {
-        use std::path::PathBuf;
-
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-
         // ===== Test normal resolution (active/) =====
         eprintln!("=== Normal Resolution (active/) ===");
-        let active_dir =
-            PathBuf::from(manifest_dir).join("tests/fixtures/countdown_monitor/active");
         let mut norm_total = 0;
         let mut norm_passed = 0;
         let mut norm_failures: Vec<String> = Vec::new();
 
-        if let Ok(paths) = std::fs::read_dir(&active_dir) {
-            let mut sorted: Vec<_> = paths.filter_map(|p| p.ok()).collect();
-            sorted.sort_by_key(|p| p.file_name());
+        for (path, filename) in fixture_pngs("active").unwrap_or_default() {
+            let Some(expected) = expected_time(&filename) else {
+                continue;
+            };
+            norm_total += 1;
 
-            for entry in sorted {
-                let path = entry.path();
-                let filename = path.file_name().unwrap().to_str().unwrap().to_string();
-                if !filename.ends_with(".png") {
-                    continue;
-                }
-
-                let content = filename
-                    .replace("binary_", "")
-                    .replace("failed_", "")
-                    .replace(".png", "");
-                let parts: Vec<&str> = content.split('-').collect();
-                if parts.len() != 3 {
-                    continue;
-                }
-
-                norm_total += 1;
-                let exp_min: u8 = parts[0].parse().unwrap_or(0);
-                let exp_sec: u8 = parts[1].parse().unwrap_or(0);
-                let exp_ms: u16 = parts[2].parse().unwrap_or(0);
-
-                let img = image::open(&path).expect("open").to_luma8();
-                let w = img.width();
-                let h = img.height();
-                let binary = img.into_vec();
-
-                match recognize_timer_from_binary(&binary, w, h) {
-                    Some(timer) => {
-                        if timer.minutes == exp_min
-                            && timer.seconds == exp_sec
-                            && timer.milliseconds == exp_ms
-                        {
-                            norm_passed += 1;
-                        } else {
-                            norm_failures.push(format!(
-                                "{}: exp {:02}:{:02}.{:03}, got {}",
-                                filename,
-                                exp_min,
-                                exp_sec,
-                                exp_ms,
-                                timer.to_string()
-                            ));
-                        }
-                    }
-                    None => {
-                        norm_failures.push(format!("{}: recognition returned None", filename));
-                    }
+            let img = image::open(&path).expect("open").to_luma8();
+            let (w, h) = img.dimensions();
+            match recognize_timer_from_binary(&img.into_vec(), w, h) {
+                Some(timer) if is_time(&timer, expected) => norm_passed += 1,
+                Some(timer) => norm_failures.push(mismatch(&filename, expected, &timer)),
+                None => {
+                    norm_failures.push(format!("{filename}.png: recognition returned None"));
                 }
             }
         }
 
-        eprintln!("Normal: {}/{} passed", norm_passed, norm_total);
+        eprintln!("Normal: {norm_passed}/{norm_total} passed");
         for f in &norm_failures {
-            eprintln!("  FAIL: {}", f);
+            eprintln!("  FAIL: {f}");
         }
 
         // ===== Test min resolution (min-active/) =====
         eprintln!("\n=== Min Resolution (min-active/) ===");
-        let min_dir =
-            PathBuf::from(manifest_dir).join("tests/fixtures/countdown_monitor/min-active");
         let mut min_total = 0;
         let mut min_passed = 0;
         let mut min_seg_fails = 0;
         let mut min_rec_failures: Vec<String> = Vec::new();
 
-        if let Ok(paths) = std::fs::read_dir(&min_dir) {
-            let mut sorted: Vec<_> = paths.filter_map(|p| p.ok()).collect();
-            sorted.sort_by_key(|p| p.file_name());
+        for (path, filename) in fixture_pngs("min-active").unwrap_or_default() {
+            let Some(expected) = expected_time(&filename) else {
+                continue;
+            };
+            min_total += 1;
 
-            for entry in sorted {
-                let path = entry.path();
-                let filename = path.file_name().unwrap().to_str().unwrap().to_string();
-                if !filename.ends_with(".png") {
-                    continue;
-                }
-
-                let content = filename.replace(".png", "");
-                let parts: Vec<&str> = content.split('-').collect();
-                if parts.len() != 3 {
-                    continue;
-                }
-
-                min_total += 1;
-                let exp_min: u8 = parts[0].parse().unwrap_or(0);
-                let exp_sec: u8 = parts[1].parse().unwrap_or(0);
-                let exp_ms: u16 = parts[2].parse().unwrap_or(0);
-
-                let rgb_img = image::open(&path).expect("open").to_rgb8();
-                let w = rgb_img.width();
-                let h = rgb_img.height();
-                let binary = binarize_for_ocr(&rgb_img.into_raw(), w, h);
-
-                match recognize_timer_from_binary(&binary, w, h) {
-                    Some(timer) => {
-                        if timer.minutes == exp_min
-                            && timer.seconds == exp_sec
-                            && timer.milliseconds == exp_ms
-                        {
-                            min_passed += 1;
-                        } else {
-                            min_rec_failures.push(format!(
-                                "{}: exp {:02}:{:02}.{:03}, got {}",
-                                filename,
-                                exp_min,
-                                exp_sec,
-                                exp_ms,
-                                timer.to_string()
-                            ));
-                        }
-                    }
-                    None => {
-                        min_seg_fails += 1;
-                        eprintln!("  [{}] segmentation/field mismatch → skipped", filename);
-                    }
+            let rgb_img = image::open(&path).expect("open").to_rgb8();
+            let (w, h) = rgb_img.dimensions();
+            let binary = binarize_for_ocr(&rgb_img.into_raw(), w, h);
+            match recognize_timer_from_binary(&binary, w, h) {
+                Some(timer) if is_time(&timer, expected) => min_passed += 1,
+                Some(timer) => min_rec_failures.push(mismatch(&filename, expected, &timer)),
+                None => {
+                    min_seg_fails += 1;
+                    eprintln!("  [{filename}.png] segmentation/field mismatch → skipped");
                 }
             }
         }
 
         let min_recognized = min_total - min_seg_fails;
         eprintln!(
-            "\nMin: {}/{} recognized, {}/{} passed",
-            min_recognized, min_total, min_passed, min_recognized
+            "\nMin: {min_recognized}/{min_total} recognized, {min_passed}/{min_recognized} passed"
         );
         for f in &min_rec_failures {
-            eprintln!("  FAIL: {}", f);
+            eprintln!("  FAIL: {f}");
         }
 
         eprintln!("\n=== Summary ===");
+        eprintln!("Normal: {norm_passed}/{norm_total} (recognition accuracy)");
         eprintln!(
-            "Normal: {}/{} (recognition accuracy)",
-            norm_passed, norm_total
-        );
-        eprintln!(
-            "Min: segmentation {}/{}, recognition {}/{}",
-            min_recognized, min_total, min_passed, min_recognized
+            "Min: segmentation {min_recognized}/{min_total}, recognition {min_passed}/{min_recognized}"
         );
 
         // Assert: normal resolution must be perfect, min recognition must be perfect
         assert_eq!(
             norm_failures.len(),
             0,
-            "Normal resolution failures: {:?}",
-            norm_failures
+            "Normal resolution failures: {norm_failures:?}"
         );
         assert_eq!(
             min_rec_failures.len(),
             0,
-            "Min resolution recognition failures: {:?}",
-            min_rec_failures
+            "Min resolution recognition failures: {min_rec_failures:?}"
         );
     }
 }

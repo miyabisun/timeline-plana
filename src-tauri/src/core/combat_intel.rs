@@ -20,7 +20,7 @@ pub const PAUSE_ROI_Y_END: f32 = 0.197;
 
 static PAUSE_TEMPLATE: OnceLock<GrayImage> = OnceLock::new();
 
-/// Load PAUSE template (grayscale) using OnceLock lazy init.
+/// Load PAUSE template (grayscale) using `OnceLock` lazy init.
 fn get_pause_template() -> &'static GrayImage {
     PAUSE_TEMPLATE.get_or_init(|| {
         let bytes = include_bytes!("templates/pause.png");
@@ -36,7 +36,7 @@ fn get_pause_template() -> &'static GrayImage {
 /// * `data` - Raw pixel data (RGB8 or RGBA8 depending on `bpp`)
 /// * `src_width` - Full frame width
 /// * `bpp` - Bytes per pixel (3 for RGB, 4 for RGBA)
-/// * `roi` - (x_start, y_start, x_end, y_end) in pixels
+/// * `roi` - (`x_start`, `y_start`, `x_end`, `y_end`) in pixels
 /// * `target_size` - (width, height) to resize the result to
 fn extract_grayscale_scaled(
     data: &[u8],
@@ -55,9 +55,9 @@ fn extract_grayscale_scaled(
             let idx = (((ry0 + y) * src_width + (rx0 + x)) * bpp) as usize;
             // Only R/G/B (idx..idx+2) are read regardless of bpp, so +2 suffices
             if idx + 2 < data.len() {
-                let r = data[idx] as f32;
-                let g = data[idx + 1] as f32;
-                let b = data[idx + 2] as f32;
+                let r = f32::from(data[idx]);
+                let g = f32::from(data[idx + 1]);
+                let b = f32::from(data[idx + 2]);
                 let lum = (0.299 * r + 0.587 * g + 0.114 * b) as u8;
                 gray.put_pixel(x, y, Luma([lum]));
             }
@@ -72,7 +72,7 @@ fn extract_grayscale_scaled(
 /// Returns a value in [-1.0, 1.0]. Higher values indicate better match.
 /// Both images must have the same dimensions.
 fn compute_ncc(template: &GrayImage, candidate: &GrayImage) -> f32 {
-    let n = (template.width() * template.height()) as f64;
+    let n = f64::from(template.width() * template.height());
     if n == 0.0 {
         return 0.0;
     }
@@ -81,8 +81,8 @@ fn compute_ncc(template: &GrayImage, candidate: &GrayImage) -> f32 {
     let mut sum_t = 0.0_f64;
     let mut sum_c = 0.0_f64;
     for (pt, pc) in template.pixels().zip(candidate.pixels()) {
-        sum_t += pt.0[0] as f64;
-        sum_c += pc.0[0] as f64;
+        sum_t += f64::from(pt.0[0]);
+        sum_c += f64::from(pc.0[0]);
     }
     let mean_t = sum_t / n;
     let mean_c = sum_c / n;
@@ -93,8 +93,8 @@ fn compute_ncc(template: &GrayImage, candidate: &GrayImage) -> f32 {
     let mut denom_c = 0.0_f64;
 
     for (pt, pc) in template.pixels().zip(candidate.pixels()) {
-        let dt = pt.0[0] as f64 - mean_t;
-        let dc = pc.0[0] as f64 - mean_c;
+        let dt = f64::from(pt.0[0]) - mean_t;
+        let dc = f64::from(pc.0[0]) - mean_c;
         numerator += dt * dc;
         denom_t += dt * dt;
         denom_c += dc * dc;
@@ -110,7 +110,7 @@ fn compute_ncc(template: &GrayImage, candidate: &GrayImage) -> f32 {
 
 /// Detect PAUSE dialog text using NCC template matching on RGB data.
 ///
-/// Returns NCC score (-1.0 to 1.0). Score > PAUSE_NCC_THRESHOLD indicates PAUSE is visible.
+/// Returns NCC score (-1.0 to 1.0). Score > `PAUSE_NCC_THRESHOLD` indicates PAUSE is visible.
 pub fn detect_pause_text(rgb_data: &[u8], width: u32, height: u32) -> f32 {
     let template = get_pause_template();
     let target_size = (template.width(), template.height());
@@ -132,7 +132,7 @@ pub fn detect_pause_text(rgb_data: &[u8], width: u32, height: u32) -> f32 {
 /// as a dense RGBA buffer, and this function handles grayscale conversion, resize,
 /// and NCC computation on the worker thread (avoiding blocking the capture callback).
 ///
-/// Returns NCC score (-1.0 to 1.0). Score > PAUSE_NCC_THRESHOLD indicates PAUSE is visible.
+/// Returns NCC score (-1.0 to 1.0). Score > `PAUSE_NCC_THRESHOLD` indicates PAUSE is visible.
 pub fn compute_pause_ncc_from_roi(roi_rgba: &[u8], roi_width: u32, roi_height: u32) -> f32 {
     if roi_width == 0 || roi_height == 0 {
         return 0.0;
@@ -216,27 +216,27 @@ pub fn check_pause_presence_in_wide_roi(rgb_data: &[u8], width: u32, height: u32
     // 0.92 is roughly (0.92 - 0.85) / (1.00 - 0.85) = 0.07 / 0.15 = 46.6% mark.
 
     // Scan from 50% to 100% of this strip to be safe.
-    let roi_x_start = width / 2;
-    let roi_x_end = width;
+    let left = width / 2;
+    let right = width;
 
     // Height: Pause button is at top 5%.
-    let roi_y_start = (height as f32 * 0.005) as u32;
-    let roi_y_end = (height as f32 * 0.20) as u32; // Scan a bit deeper just in case
+    let top = (height as f32 * 0.005) as u32;
+    let bottom = (height as f32 * 0.20) as u32; // Scan a bit deeper just in case
 
     let mut white_pixel_count = 0u32;
     let mut blue_pixel_count = 0u32;
     let mut total_pixels = 0u32;
 
-    for y in (roi_y_start..roi_y_end).step_by(2) {
-        for x in (roi_x_start..roi_x_end).step_by(2) {
+    for y in (top..bottom).step_by(2) {
+        for x in (left..right).step_by(2) {
             let idx = ((y * width + x) * 3) as usize;
             if idx + 2 >= rgb_data.len() {
                 continue;
             }
 
-            let r = rgb_data[idx] as i32;
-            let g = rgb_data[idx + 1] as i32;
-            let b = rgb_data[idx + 2] as i32;
+            let r = i32::from(rgb_data[idx]);
+            let g = i32::from(rgb_data[idx + 1]);
+            let b = i32::from(rgb_data[idx + 2]);
 
             total_pixels += 1;
 
@@ -281,26 +281,26 @@ fn check_pause_button_visible(rgb_data: &[u8], width: u32, height: u32) -> bool 
 fn check_pause_button_debug(rgb_data: &[u8], width: u32, height: u32) -> (f32, f32) {
     // ROI: top-right corner where the pause button lives
     // 92%-100% horizontally, 0.5%-5% vertically
-    let roi_x_start = (width as f32 * 0.92) as u32;
-    let roi_x_end = width;
-    let roi_y_start = (height as f32 * 0.005) as u32;
-    let roi_y_end = (height as f32 * 0.05) as u32;
+    let left = (width as f32 * 0.92) as u32;
+    let right = width;
+    let top = (height as f32 * 0.005) as u32;
+    let bottom = (height as f32 * 0.05) as u32;
 
     let mut blue_pixel_count = 0u32;
     let mut white_pixel_count = 0u32;
     let mut total_pixels = 0u32;
 
     // Sample every 2nd pixel to speed up
-    for y in (roi_y_start..roi_y_end).step_by(2) {
-        for x in (roi_x_start..roi_x_end).step_by(2) {
+    for y in (top..bottom).step_by(2) {
+        for x in (left..right).step_by(2) {
             let idx = ((y * width + x) * 3) as usize;
             if idx + 2 >= rgb_data.len() {
                 continue;
             }
 
-            let r = rgb_data[idx] as i32;
-            let g = rgb_data[idx + 1] as i32;
-            let b = rgb_data[idx + 2] as i32;
+            let r = i32::from(rgb_data[idx]);
+            let g = i32::from(rgb_data[idx + 1]);
+            let b = i32::from(rgb_data[idx + 2]);
 
             total_pixels += 1;
 
@@ -344,9 +344,9 @@ fn calculate_center_brightness(rgb_data: &[u8], width: u32, height: u32) -> f64 
                 continue;
             }
 
-            let r = rgb_data[idx] as u64;
-            let g = rgb_data[idx + 1] as u64;
-            let b = rgb_data[idx + 2] as u64;
+            let r = u64::from(rgb_data[idx]);
+            let g = u64::from(rgb_data[idx + 1]);
+            let b = u64::from(rgb_data[idx + 2]);
 
             // Perceived brightness (ITU-R BT.601)
             let brightness = (299 * r + 587 * g + 114 * b) / 1000;
@@ -370,9 +370,9 @@ mod tests {
     fn load_test_image(filename: &str) -> (Vec<u8>, u32, u32) {
         // CARGO_MANIFEST_DIR points to src-tauri during cargo test
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let path = format!("{}/tests/fixtures/screenshots/{}", manifest_dir, filename);
-        let img = image::open(&path)
-            .unwrap_or_else(|e| panic!("Failed to load test image {}: {}", path, e));
+        let path = format!("{manifest_dir}/tests/fixtures/screenshots/{filename}");
+        let img =
+            image::open(&path).unwrap_or_else(|e| panic!("Failed to load test image {path}: {e}"));
         let rgb_img = img.to_rgb8();
         let (width, height) = rgb_img.dimensions();
         let rgb_data = rgb_img.into_raw();
@@ -407,8 +407,7 @@ mod tests {
         assert_eq!(
             state,
             BattleState::Paused,
-            "Expected Paused state for battle-pause.png, got {:?}",
-            state
+            "Expected Paused state for battle-pause.png, got {state:?}"
         );
     }
 
@@ -418,8 +417,7 @@ mod tests {
         let state = analyze_battle_state(&rgb_data, width, height);
         assert!(
             state == BattleState::Paused || state == BattleState::Slow,
-            "Expected Paused or Slow state for battle-slow.png, got {:?}",
-            state
+            "Expected Paused or Slow state for battle-slow.png, got {state:?}"
         );
     }
 
@@ -430,8 +428,7 @@ mod tests {
         assert_eq!(
             state,
             BattleState::Inactive,
-            "Expected Inactive state for home.png, got {:?}",
-            state
+            "Expected Inactive state for home.png, got {state:?}"
         );
     }
 
@@ -442,8 +439,7 @@ mod tests {
         assert_eq!(
             state,
             BattleState::Inactive,
-            "Expected Inactive state for home-noui.png, got {:?}",
-            state
+            "Expected Inactive state for home-noui.png, got {state:?}"
         );
     }
 
@@ -461,11 +457,10 @@ mod tests {
     fn test_center_brightness_active() {
         let (rgb_data, width, height) = load_test_image("battle-active.png");
         let brightness = calculate_center_brightness(&rgb_data, width, height);
-        println!("Active brightness: {}", brightness);
+        println!("Active brightness: {brightness}");
         assert!(
             brightness > 80.0,
-            "Active screen should have brightness > 80, got {}",
-            brightness
+            "Active screen should have brightness > 80, got {brightness}"
         );
     }
 
@@ -473,18 +468,17 @@ mod tests {
     fn test_center_brightness_paused() {
         let (rgb_data, width, height) = load_test_image("battle-pause.png");
         let brightness = calculate_center_brightness(&rgb_data, width, height);
-        println!("Paused brightness: {}", brightness);
+        println!("Paused brightness: {brightness}");
         // Paused screen has white PAUSE menu in center, expect HIGHER brightness
         // This is different from Slow mode which has dark overlay
         assert!(
             brightness > 150.0,
-            "Paused screen should have high brightness (white menu), got {}",
-            brightness
+            "Paused screen should have high brightness (white menu), got {brightness}"
         );
     }
 
     #[test]
-    #[ignore] // Diagnostic only: prints pixel values, no assertions
+    #[ignore = "diagnostic only: prints pixel values, no assertions"]
     fn test_diagnostic_all_images() {
         // Diagnostic test: print all values to calibrate thresholds
         println!("\n=== DIAGNOSTIC OUTPUT ===\n");
@@ -503,39 +497,33 @@ mod tests {
             let pause_ncc = detect_pause_text(&rgb_data, width, height);
             let state = analyze_battle_state(&rgb_data, width, height);
 
-            println!("Image: {} ({}x{})", img_name, width, height);
+            println!("Image: {img_name} ({width}x{height})");
             let (blue_ratio, white_ratio) = check_pause_button_debug(&rgb_data, width, height);
-            println!(
-                "  Blue ratio: {:.4}, White ratio: {:.4}",
-                blue_ratio, white_ratio
-            );
-            println!("  Pause NCC score: {:.6}", pause_ncc);
-            println!("  Pause button visible: {}", pause_visible);
-            println!("  Center brightness: {:.2}", brightness);
-            println!("  Detected state: {:?}", state);
+            println!("  Blue ratio: {blue_ratio:.4}, White ratio: {white_ratio:.4}");
+            println!("  Pause NCC score: {pause_ncc:.6}");
+            println!("  Pause button visible: {pause_visible}");
+            println!("  Center brightness: {brightness:.2}");
+            println!("  Detected state: {state:?}");
 
             // Sample some pixels in the ROI region
-            let roi_x_start = (width as f32 * 0.975) as u32;
-            let roi_x_end = width.saturating_sub(5);
-            let roi_y_start = (height as f32 * 0.01) as u32;
-            let roi_y_end = (height as f32 * 0.045) as u32;
-            let scan_y = (roi_y_start + roi_y_end) / 2;
+            let left = (width as f32 * 0.975) as u32;
+            let right = width.saturating_sub(5);
+            let top = (height as f32 * 0.01) as u32;
+            let bottom = (height as f32 * 0.045) as u32;
+            let scan_y = u32::midpoint(top, bottom);
 
-            println!(
-                "  ROI: x={}..{}, y={}..{}, scan_y={}",
-                roi_x_start, roi_x_end, roi_y_start, roi_y_end, scan_y
-            );
+            println!("  ROI: x={left}..{right}, y={top}..{bottom}, scan_y={scan_y}");
 
             // Sample 10 pixels across the ROI
-            let step = std::cmp::max(1, (roi_x_end - roi_x_start) / 10);
-            print!("  Pixels at y={}: ", scan_y);
-            for x in (roi_x_start..roi_x_end).step_by(step as usize) {
+            let step = std::cmp::max(1, (right - left) / 10);
+            print!("  Pixels at y={scan_y}: ");
+            for x in (left..right).step_by(step as usize) {
                 let idx = ((scan_y * width + x) * 3) as usize;
                 if idx + 2 < rgb_data.len() {
                     let r = rgb_data[idx];
                     let g = rgb_data[idx + 1];
                     let b = rgb_data[idx + 2];
-                    print!("({},{},{}) ", r, g, b);
+                    print!("({r},{g},{b}) ");
                 }
             }
             println!();
@@ -547,29 +535,29 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Template generation tool — writes to src/core/templates/pause.png
+    #[ignore = "template generation tool: writes src/core/templates/pause.png"]
     fn generate_pause_template() {
         use std::path::PathBuf;
 
         let (rgb_data, width, height) = load_test_image("battle-pause.png");
 
         // ROI: x=38-62%, y=13-19% (PAUSE dialog header)
-        let roi_x_start = (width as f32 * 0.38) as u32;
-        let roi_x_end = (width as f32 * 0.62) as u32;
-        let roi_y_start = (height as f32 * 0.13) as u32;
-        let roi_y_end = (height as f32 * 0.19) as u32;
+        let left = (width as f32 * 0.38) as u32;
+        let right = (width as f32 * 0.62) as u32;
+        let top = (height as f32 * 0.13) as u32;
+        let bottom = (height as f32 * 0.19) as u32;
 
-        let roi_w = roi_x_end - roi_x_start;
-        let roi_h = roi_y_end - roi_y_start;
+        let roi_w = right - left;
+        let roi_h = bottom - top;
 
         // Extract ROI and convert to grayscale
         let mut gray_data = Vec::with_capacity((roi_w * roi_h) as usize);
-        for y in roi_y_start..roi_y_end {
-            for x in roi_x_start..roi_x_end {
+        for y in top..bottom {
+            for x in left..right {
                 let idx = ((y * width + x) * 3) as usize;
-                let r = rgb_data[idx] as f32;
-                let g = rgb_data[idx + 1] as f32;
-                let b = rgb_data[idx + 2] as f32;
+                let r = f32::from(rgb_data[idx]);
+                let g = f32::from(rgb_data[idx + 1]);
+                let b = f32::from(rgb_data[idx + 2]);
                 let lum = (0.299 * r + 0.587 * g + 0.114 * b) as u8;
                 gray_data.push(lum);
             }
@@ -589,10 +577,7 @@ mod tests {
             image::ColorType::L8,
         )
         .expect("Failed to save pause template");
-        println!(
-            "Saved pause template to {:?} ({}x{})",
-            template_path, roi_w, roi_h
-        );
+        println!("Saved pause template to {template_path:?} ({roi_w}x{roi_h})");
 
         // Also save to output/ for visual inspection
         let output_dir = PathBuf::from(manifest_dir).parent().unwrap().join("output");
@@ -600,7 +585,7 @@ mod tests {
         let output_path = output_dir.join("pause_template.png");
         image::save_buffer(&output_path, &gray_data, roi_w, roi_h, image::ColorType::L8)
             .expect("Failed to save pause template to output");
-        println!("Saved visual copy to {:?}", output_path);
+        println!("Saved visual copy to {output_path:?}");
     }
 
     #[test]
@@ -610,10 +595,7 @@ mod tests {
         assert_eq!(
             state,
             BattleState::Active,
-            "Expected Active for min-battle-active.png ({}x{}), got {:?}",
-            width,
-            height,
-            state
+            "Expected Active for min-battle-active.png ({width}x{height}), got {state:?}"
         );
     }
 
@@ -624,10 +606,7 @@ mod tests {
         assert_eq!(
             state,
             BattleState::Paused,
-            "Expected Paused for min-battle-pause.png ({}x{}), got {:?}",
-            width,
-            height,
-            state
+            "Expected Paused for min-battle-pause.png ({width}x{height}), got {state:?}"
         );
     }
 
@@ -637,10 +616,7 @@ mod tests {
         let state = analyze_battle_state(&rgb_data, width, height);
         assert!(
             state == BattleState::Paused || state == BattleState::Slow,
-            "Expected Paused or Slow for min-battle-slow.png ({}x{}), got {:?}",
-            width,
-            height,
-            state
+            "Expected Paused or Slow for min-battle-slow.png ({width}x{height}), got {state:?}"
         );
     }
 
@@ -651,10 +627,7 @@ mod tests {
         assert_eq!(
             state,
             BattleState::Inactive,
-            "Expected Inactive for min-home.png ({}x{}), got {:?}",
-            width,
-            height,
-            state
+            "Expected Inactive for min-home.png ({width}x{height}), got {state:?}"
         );
     }
 
@@ -665,10 +638,7 @@ mod tests {
         assert_eq!(
             state,
             BattleState::Inactive,
-            "Expected Inactive for min-home-noui.png ({}x{}), got {:?}",
-            width,
-            height,
-            state
+            "Expected Inactive for min-home-noui.png ({width}x{height}), got {state:?}"
         );
     }
 }
