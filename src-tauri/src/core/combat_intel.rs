@@ -378,7 +378,8 @@ mod tests {
         let rgb_data = rgb_img.into_raw();
 
         // Detect and crop black bars (content anchored at top-left)
-        let (cw, ch) = crate::core::visual_intercept::detect_content_bounds(&rgb_data, width, height, 3);
+        let (cw, ch) =
+            crate::core::visual_intercept::detect_content_bounds(&rgb_data, width, height, 3);
         let mut cropped = Vec::with_capacity((cw * ch * 3) as usize);
         for y in 0..ch {
             let start = (y * width * 3) as usize;
@@ -488,7 +489,13 @@ mod tests {
         // Diagnostic test: print all values to calibrate thresholds
         println!("\n=== DIAGNOSTIC OUTPUT ===\n");
 
-        let images = ["battle-active.png", "battle-pause.png", "battle-slow.png", "home.png", "home-noui.png"];
+        let images = [
+            "battle-active.png",
+            "battle-pause.png",
+            "battle-slow.png",
+            "home.png",
+            "home-noui.png",
+        ];
         for img_name in images {
             let (rgb_data, width, height) = load_test_image(img_name);
             let brightness = calculate_center_brightness(&rgb_data, width, height);
@@ -582,20 +589,17 @@ mod tests {
             image::ColorType::L8,
         )
         .expect("Failed to save pause template");
-        println!("Saved pause template to {:?} ({}x{})", template_path, roi_w, roi_h);
+        println!(
+            "Saved pause template to {:?} ({}x{})",
+            template_path, roi_w, roi_h
+        );
 
         // Also save to output/ for visual inspection
         let output_dir = PathBuf::from(manifest_dir).parent().unwrap().join("output");
         let _ = std::fs::create_dir_all(&output_dir);
         let output_path = output_dir.join("pause_template.png");
-        image::save_buffer(
-            &output_path,
-            &gray_data,
-            roi_w,
-            roi_h,
-            image::ColorType::L8,
-        )
-        .expect("Failed to save pause template to output");
+        image::save_buffer(&output_path, &gray_data, roi_w, roi_h, image::ColorType::L8)
+            .expect("Failed to save pause template to output");
         println!("Saved visual copy to {:?}", output_path);
     }
 
@@ -603,39 +607,68 @@ mod tests {
     fn test_min_battle_active() {
         let (rgb_data, width, height) = load_test_image("min-battle-active.png");
         let state = analyze_battle_state(&rgb_data, width, height);
-        assert_eq!(state, BattleState::Active,
-            "Expected Active for min-battle-active.png ({}x{}), got {:?}", width, height, state);
+        assert_eq!(
+            state,
+            BattleState::Active,
+            "Expected Active for min-battle-active.png ({}x{}), got {:?}",
+            width,
+            height,
+            state
+        );
     }
 
     #[test]
     fn test_min_battle_paused() {
         let (rgb_data, width, height) = load_test_image("min-battle-pause.png");
         let state = analyze_battle_state(&rgb_data, width, height);
-        assert_eq!(state, BattleState::Paused,
-            "Expected Paused for min-battle-pause.png ({}x{}), got {:?}", width, height, state);
+        assert_eq!(
+            state,
+            BattleState::Paused,
+            "Expected Paused for min-battle-pause.png ({}x{}), got {:?}",
+            width,
+            height,
+            state
+        );
     }
 
     #[test]
     fn test_min_battle_slow() {
         let (rgb_data, width, height) = load_test_image("min-battle-slow.png");
         let state = analyze_battle_state(&rgb_data, width, height);
-        assert!(state == BattleState::Paused || state == BattleState::Slow,
-            "Expected Paused or Slow for min-battle-slow.png ({}x{}), got {:?}", width, height, state);
+        assert!(
+            state == BattleState::Paused || state == BattleState::Slow,
+            "Expected Paused or Slow for min-battle-slow.png ({}x{}), got {:?}",
+            width,
+            height,
+            state
+        );
     }
 
     #[test]
     fn test_min_home_inactive() {
         let (rgb_data, width, height) = load_test_image("min-home.png");
         let state = analyze_battle_state(&rgb_data, width, height);
-        assert_eq!(state, BattleState::Inactive,
-            "Expected Inactive for min-home.png ({}x{}), got {:?}", width, height, state);
+        assert_eq!(
+            state,
+            BattleState::Inactive,
+            "Expected Inactive for min-home.png ({}x{}), got {:?}",
+            width,
+            height,
+            state
+        );
     }
 
     #[test]
     fn test_min_home_noui_inactive() {
         let (rgb_data, width, height) = load_test_image("min-home-noui.png");
         let state = analyze_battle_state(&rgb_data, width, height);
-        assert_eq!(state, BattleState::Inactive,
-            "Expected Inactive for min-home-noui.png ({}x{}), got {:?}", width, height, state);
+        assert_eq!(
+            state,
+            BattleState::Inactive,
+            "Expected Inactive for min-home-noui.png ({}x{}), got {:?}",
+            width,
+            height,
+            state
+        );
     }
 }

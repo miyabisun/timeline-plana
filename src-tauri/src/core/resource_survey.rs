@@ -75,7 +75,12 @@ pub const COST_SKEW_FACTOR: f32 = 0.175;
 ///
 /// # Returns
 /// Tuple of (corrected RGB data, new width, same height)
-pub fn apply_cost_skew(rgb_data: &[u8], width: u32, height: u32, skew_factor: f32) -> (Vec<u8>, u32, u32) {
+pub fn apply_cost_skew(
+    rgb_data: &[u8],
+    width: u32,
+    height: u32,
+    skew_factor: f32,
+) -> (Vec<u8>, u32, u32) {
     let max_shift = (skew_factor * height as f32).ceil() as u32;
     let new_width = width + max_shift;
 
@@ -236,7 +241,12 @@ fn classify_box_broad(filled_profile: &[f32], blue_profile: &[f32], start: u32, 
 ///
 /// # Returns
 /// `Some(CostValue)` if cost boxes were successfully detected, `None` otherwise.
-pub fn read_cost_gauge(rgb_data: &[u8], width: u32, height: u32, max_cost: u32) -> Option<CostValue> {
+pub fn read_cost_gauge(
+    rgb_data: &[u8],
+    width: u32,
+    height: u32,
+    max_cost: u32,
+) -> Option<CostValue> {
     if width < 10 || height < 5 || max_cost < 2 {
         return None;
     }
@@ -342,7 +352,8 @@ mod tests {
         let rgb_data = rgb_img.into_raw();
 
         // Detect and crop black bars (content anchored at top-left)
-        let (cw, ch) = crate::core::visual_intercept::detect_content_bounds(&rgb_data, width, height, 3);
+        let (cw, ch) =
+            crate::core::visual_intercept::detect_content_bounds(&rgb_data, width, height, 3);
         let mut cropped = Vec::with_capacity((cw * ch * 3) as usize);
         for y in 0..ch {
             let start = (y * width * 3) as usize;
@@ -414,7 +425,10 @@ mod tests {
         let result = read_cost_gauge(&roi_data, roi_w, roi_h, 10);
         println!("Pause cost result: {:?}", result);
 
-        assert!(result.is_some(), "Should detect cost gauge in battle-pause.png");
+        assert!(
+            result.is_some(),
+            "Should detect cost gauge in battle-pause.png"
+        );
         let cost = result.unwrap();
         assert_eq!(cost.max_cost, 10);
         assert!(
@@ -432,7 +446,10 @@ mod tests {
         let result = read_cost_gauge(&roi_data, roi_w, roi_h, 10);
         println!("Slow cost result: {:?}", result);
 
-        assert!(result.is_some(), "Should detect cost gauge in battle-slow.png");
+        assert!(
+            result.is_some(),
+            "Should detect cost gauge in battle-slow.png"
+        );
         let cost = result.unwrap();
         assert_eq!(cost.max_cost, 10);
         assert!(
@@ -524,7 +541,10 @@ mod tests {
         assert_eq!(new_w, width);
         assert_eq!(new_h, height);
         // With zero skew, output should be identical to input
-        assert_eq!(output, rgb_data, "Zero skew should produce identical output");
+        assert_eq!(
+            output, rgb_data,
+            "Zero skew should produce identical output"
+        );
     }
 
     #[test]
@@ -535,9 +555,9 @@ mod tests {
         let mut rgb_data = vec![0u8; (width * height * 3) as usize];
         // Mark pixel at (0, 2) = bottom-left with distinctive color
         let idx = ((2 * width + 0) * 3) as usize;
-        rgb_data[idx] = 255;     // R
+        rgb_data[idx] = 255; // R
         rgb_data[idx + 1] = 128; // G
-        rgb_data[idx + 2] = 64;  // B
+        rgb_data[idx + 2] = 64; // B
 
         let (output, new_w, _) = apply_cost_skew(&rgb_data, width, height, 1.0);
 
@@ -557,9 +577,7 @@ mod tests {
         // Create a 10x10 image where all pixels are blue (R=0, G=0, B=200)
         let width = 10u32;
         let height = 10u32;
-        let rgb_data: Vec<u8> = (0..width * height)
-            .flat_map(|_| [0u8, 0, 200])
-            .collect();
+        let rgb_data: Vec<u8> = (0..width * height).flat_map(|_| [0u8, 0, 200]).collect();
 
         let profile = build_blue_profile(&rgb_data, width, height);
 
@@ -592,7 +610,11 @@ mod tests {
         let rgb_data: Vec<u8> = (0..width * height)
             .flat_map(|i| {
                 let x = i % width;
-                if x < 5 { [10u8, 255, 255] } else { [0, 0, 0] }
+                if x < 5 {
+                    [10u8, 255, 255]
+                } else {
+                    [0, 0, 0]
+                }
             })
             .collect();
 
@@ -601,11 +623,21 @@ mod tests {
         assert_eq!(profile.len(), width as usize);
         // Left half should be high
         for x in 0..5 {
-            assert!(profile[x] > 0.9, "Column {} should be glow, got {}", x, profile[x]);
+            assert!(
+                profile[x] > 0.9,
+                "Column {} should be glow, got {}",
+                x,
+                profile[x]
+            );
         }
         // Right half should be zero
         for x in 5..10 {
-            assert!(profile[x] < 0.01, "Column {} should be empty, got {}", x, profile[x]);
+            assert!(
+                profile[x] < 0.01,
+                "Column {} should be empty, got {}",
+                x,
+                profile[x]
+            );
         }
     }
 
@@ -617,7 +649,11 @@ mod tests {
         let rgb_data: Vec<u8> = (0..width * height)
             .flat_map(|i| {
                 let x = i % width;
-                if x < 5 { [50u8, 80, 150] } else { [0, 0, 0] }
+                if x < 5 {
+                    [50u8, 80, 150]
+                } else {
+                    [0, 0, 0]
+                }
             })
             .collect();
 
@@ -625,10 +661,20 @@ mod tests {
 
         assert_eq!(profile.len(), width as usize);
         for x in 0..5 {
-            assert!(profile[x] > 0.9, "Column {} should be filled, got {}", x, profile[x]);
+            assert!(
+                profile[x] > 0.9,
+                "Column {} should be filled, got {}",
+                x,
+                profile[x]
+            );
         }
         for x in 5..10 {
-            assert!(profile[x] < 0.01, "Column {} should be empty, got {}", x, profile[x]);
+            assert!(
+                profile[x] < 0.01,
+                "Column {} should be empty, got {}",
+                x,
+                profile[x]
+            );
         }
     }
 
@@ -703,7 +749,11 @@ mod tests {
         let result = read_cost_gauge(&rgb_data, width, height, 10);
         assert!(result.is_some());
         let cost = result.unwrap();
-        assert!(cost.current < 0.1, "All black should give ~0 cost, got {}", cost.current);
+        assert!(
+            cost.current < 0.1,
+            "All black should give ~0 cost, got {}",
+            cost.current
+        );
     }
 
     /// Load a pre-cropped cost ROI image (already extracted, no need for extract_cost_roi).
@@ -713,8 +763,7 @@ mod tests {
             "{}/tests/fixtures/resource_survey/{}/{}",
             manifest_dir, subdir, filename
         );
-        let img = image::open(&path)
-            .unwrap_or_else(|e| panic!("Failed to load {}: {}", path, e));
+        let img = image::open(&path).unwrap_or_else(|e| panic!("Failed to load {}: {}", path, e));
         let rgb_img = img.to_rgb8();
         let (width, height) = rgb_img.dimensions();
         let rgb_data = rgb_img.into_raw();
@@ -742,8 +791,15 @@ mod tests {
             .collect();
         entries.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
 
-        println!("\n=== {} accuracy test ({} images) ===", subdir, entries.len());
-        println!("{:<24} {:>8} {:>8} {:>6} {:>6}", "File", "Expected", "Got", "Diff", "OK?");
+        println!(
+            "\n=== {} accuracy test ({} images) ===",
+            subdir,
+            entries.len()
+        );
+        println!(
+            "{:<24} {:>8} {:>8} {:>6} {:>6}",
+            "File", "Expected", "Got", "Diff", "OK?"
+        );
         println!("{}", "-".repeat(60));
 
         let (mut pass, mut fail) = (0usize, 0usize);
@@ -756,17 +812,29 @@ mod tests {
             let diff = (detected - expected).abs();
             let ok = diff <= tolerance;
 
-            if ok { pass += 1; } else { fail += 1; }
+            if ok {
+                pass += 1;
+            } else {
+                fail += 1;
+            }
 
             println!(
                 "{:<24} {:>8.1} {:>8.2} {:>6.2} {:>6}",
-                filename, expected, detected, diff,
+                filename,
+                expected,
+                detected,
+                diff,
                 if ok { "PASS" } else { "FAIL" }
             );
         }
 
         println!("{}", "-".repeat(60));
-        println!("Result: {}/{} passed (tolerance ±{:.1})", pass, pass + fail, tolerance);
+        println!(
+            "Result: {}/{} passed (tolerance ±{:.1})",
+            pass,
+            pass + fail,
+            tolerance
+        );
         (pass, fail)
     }
 
@@ -845,16 +913,31 @@ mod tests {
         for filename in images {
             let (rgb_data, width, height) = load_test_image(filename);
             let (roi_data, roi_w, roi_h) = extract_cost_roi(&rgb_data, width, height);
-            println!("{} (content={}x{}, cost_roi={}x{})", filename, width, height, roi_w, roi_h);
+            println!(
+                "{} (content={}x{}, cost_roi={}x{})",
+                filename, width, height, roi_w, roi_h
+            );
 
             let result = read_cost_gauge(&roi_data, roi_w, roi_h, 10);
-            assert!(result.is_some(),
-                "{}: cost gauge returned None (roi={}x{})", filename, roi_w, roi_h);
+            assert!(
+                result.is_some(),
+                "{}: cost gauge returned None (roi={}x{})",
+                filename,
+                roi_w,
+                roi_h
+            );
             let cost = result.unwrap();
-            println!("  cost={:.1}/{} confidence={:.2}", cost.current, cost.max_cost, cost.confidence);
+            println!(
+                "  cost={:.1}/{} confidence={:.2}",
+                cost.current, cost.max_cost, cost.confidence
+            );
             assert_eq!(cost.max_cost, 10);
-            assert!(cost.current >= 0.0 && cost.current <= 10.0,
-                "{}: cost out of range: {}", filename, cost.current);
+            assert!(
+                cost.current >= 0.0 && cost.current <= 10.0,
+                "{}: cost out of range: {}",
+                filename,
+                cost.current
+            );
         }
     }
 }

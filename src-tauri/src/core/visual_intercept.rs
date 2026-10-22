@@ -259,12 +259,11 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                     // Paused/Slow transitions only allowed from Active/Paused/Slow.
                     // Prevents home screen (bright but not battle) from triggering Paused.
                     // NCC template matching (only when needed, skipped during Active)
-                    let pause_score =
-                        crate::core::combat_intel::compute_pause_ncc_from_roi(
-                            &payload.pause_roi_rgba,
-                            payload.pause_roi_width,
-                            payload.pause_roi_height,
-                        );
+                    let pause_score = crate::core::combat_intel::compute_pause_ncc_from_roi(
+                        &payload.pause_roi_rgba,
+                        payload.pause_roi_width,
+                        payload.pause_roi_height,
+                    );
                     let brightness = payload.center_brightness;
                     if pause_score > crate::core::combat_intel::PAUSE_NCC_THRESHOLD {
                         // PAUSE dialog template matched → definitively Paused
@@ -539,7 +538,8 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                             h, m, s, millis
                         ));
                         // Extract content area (RGBA → RGB) using work_data with stride = work_width
-                        let mut rgb = Vec::with_capacity((content_width * content_height * 3) as usize);
+                        let mut rgb =
+                            Vec::with_capacity((content_width * content_height * 3) as usize);
                         for y in 0..content_height {
                             let row_start = (y * work_width) as usize * 4;
                             let row_end = row_start + content_width as usize * 4;
@@ -550,7 +550,9 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                             }
                         }
                         if let Some(img) = image::ImageBuffer::<image::Rgb<u8>, Vec<u8>>::from_raw(
-                            content_width, content_height, rgb,
+                            content_width,
+                            content_height,
+                            rgb,
                         ) {
                             let _ = img.save(&path);
                             println!("Full screenshot saved to {:?}", path);
@@ -600,9 +602,7 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                             }
                             // Apply normalize + skew correction
                             let (norm, norm_w, norm_h) =
-                                crate::core::countdown_monitor::normalize_roi(
-                                    &timer_rgb, tw, th,
-                                );
+                                crate::core::countdown_monitor::normalize_roi(&timer_rgb, tw, th);
                             let (skewed, skew_w, skew_h) =
                                 crate::core::countdown_monitor::apply_skew_correction(
                                     &norm,
@@ -676,13 +676,16 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
 
                     // Sample center brightness for Paused/Slow state detection
                     // Uses content dimensions for center point, work_width for stride
-                    let center_brightness =
-                        sample_center_brightness(&work_data, work_width, content_width, content_height);
+                    let center_brightness = sample_center_brightness(
+                        &work_data,
+                        work_width,
+                        content_width,
+                        content_height,
+                    );
 
                     // Extract PAUSE ROI for consumer-side NCC matching (cheap crop only)
                     use crate::core::combat_intel::{
-                        PAUSE_ROI_X_START, PAUSE_ROI_X_END,
-                        PAUSE_ROI_Y_START, PAUSE_ROI_Y_END,
+                        PAUSE_ROI_X_END, PAUSE_ROI_X_START, PAUSE_ROI_Y_END, PAUSE_ROI_Y_START,
                     };
                     let pause_x_start = (content_width as f32 * PAUSE_ROI_X_START) as u32;
                     let pause_x_end = (content_width as f32 * PAUSE_ROI_X_END) as u32;
@@ -691,7 +694,8 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                     let pause_roi_width = pause_x_end.saturating_sub(pause_x_start);
                     let pause_roi_height = pause_y_end.saturating_sub(pause_y_start);
 
-                    let mut pause_roi_rgba = Vec::with_capacity((pause_roi_width * pause_roi_height * 4) as usize);
+                    let mut pause_roi_rgba =
+                        Vec::with_capacity((pause_roi_width * pause_roi_height * 4) as usize);
                     for y in pause_y_start..pause_y_end {
                         let src_start = (y * work_width + pause_x_start) as usize * 4;
                         let src_end = (y * work_width + pause_x_end) as usize * 4;
@@ -773,7 +777,8 @@ pub fn detect_content_bounds(data: &[u8], width: u32, height: u32, bpp: u32) -> 
                 let r = data[idx];
                 let g = data[idx + 1];
                 let b = data[idx + 2];
-                if r > BRIGHTNESS_THRESHOLD || g > BRIGHTNESS_THRESHOLD || b > BRIGHTNESS_THRESHOLD {
+                if r > BRIGHTNESS_THRESHOLD || g > BRIGHTNESS_THRESHOLD || b > BRIGHTNESS_THRESHOLD
+                {
                     has_content = true;
                     break;
                 }
@@ -797,7 +802,8 @@ pub fn detect_content_bounds(data: &[u8], width: u32, height: u32, bpp: u32) -> 
                 let r = data[idx];
                 let g = data[idx + 1];
                 let b = data[idx + 2];
-                if r > BRIGHTNESS_THRESHOLD || g > BRIGHTNESS_THRESHOLD || b > BRIGHTNESS_THRESHOLD {
+                if r > BRIGHTNESS_THRESHOLD || g > BRIGHTNESS_THRESHOLD || b > BRIGHTNESS_THRESHOLD
+                {
                     has_content = true;
                     break;
                 }
@@ -825,7 +831,12 @@ pub fn detect_content_bounds(data: &[u8], width: u32, height: u32, bpp: u32) -> 
 /// * `content_height` - Content area height (used to compute center point)
 ///
 /// Returns average brightness (0.0–255.0), or 0.0 if the frame is too small.
-pub fn sample_center_brightness(rgba_data: &[u8], stride_width: u32, content_width: u32, content_height: u32) -> f32 {
+pub fn sample_center_brightness(
+    rgba_data: &[u8],
+    stride_width: u32,
+    content_width: u32,
+    content_height: u32,
+) -> f32 {
     let cx = content_width / 2;
     let cy = content_height / 2;
     let mut br_sum = 0u64;
@@ -912,7 +923,11 @@ mod tests {
         // Pure white (255,255,255) → brightness = 255
         let data = make_rgba_frame(100, 100, 255, 255, 255);
         let brightness = sample_center_brightness(&data, 100, 100, 100);
-        assert!((brightness - 255.0).abs() < 1.0, "Expected ~255, got {}", brightness);
+        assert!(
+            (brightness - 255.0).abs() < 1.0,
+            "Expected ~255, got {}",
+            brightness
+        );
     }
 
     #[test]
@@ -920,7 +935,11 @@ mod tests {
         // Pure black (0,0,0) → brightness = 0
         let data = make_rgba_frame(100, 100, 0, 0, 0);
         let brightness = sample_center_brightness(&data, 100, 100, 100);
-        assert!((brightness - 0.0).abs() < 0.01, "Expected ~0, got {}", brightness);
+        assert!(
+            (brightness - 0.0).abs() < 0.01,
+            "Expected ~0, got {}",
+            brightness
+        );
     }
 
     #[test]
@@ -928,7 +947,11 @@ mod tests {
         // Mid gray (128,128,128) → brightness ≈ 128
         let data = make_rgba_frame(100, 100, 128, 128, 128);
         let brightness = sample_center_brightness(&data, 100, 100, 100);
-        assert!((brightness - 128.0).abs() < 1.0, "Expected ~128, got {}", brightness);
+        assert!(
+            (brightness - 128.0).abs() < 1.0,
+            "Expected ~128, got {}",
+            brightness
+        );
     }
 
     #[test]
@@ -984,7 +1007,11 @@ mod tests {
                         }
                     }
                 }
-                if all_black { left_bar = x + 1; } else { break; }
+                if all_black {
+                    left_bar = x + 1;
+                } else {
+                    break;
+                }
             }
 
             // Check top edge: scan first 30 rows, ALL columns
@@ -1000,7 +1027,11 @@ mod tests {
                         }
                     }
                 }
-                if all_black { top_bar = y + 1; } else { break; }
+                if all_black {
+                    top_bar = y + 1;
+                } else {
+                    break;
+                }
             }
 
             println!("{}: raw={}x{}, content={}x{}, left_bar={}px, top_bar={}px, right_bar={}px, bottom_bar={}px",

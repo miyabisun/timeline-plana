@@ -467,7 +467,11 @@ fn match_segment_sad(
     for y in 0..height {
         for x in 0..seg_width {
             let src_idx = (y * width + (x_start + x)) as usize;
-            let val = if src_idx < binary.len() { binary[src_idx] } else { 0 };
+            let val = if src_idx < binary.len() {
+                binary[src_idx]
+            } else {
+                0
+            };
             segment_img.put_pixel(x, y, Luma([val]));
         }
     }
@@ -516,7 +520,11 @@ fn segment_region_density(
             }
         }
     }
-    if total == 0 { 0.0 } else { white as f32 / total as f32 }
+    if total == 0 {
+        0.0
+    } else {
+        white as f32 / total as f32
+    }
 }
 
 /// Disambiguate confusable digit pairs (3/8, 0/9) using regional pixel density.
@@ -550,19 +558,35 @@ fn disambiguate_digit(
             // 8 has closed loops connecting on the left at mid-height → high density
             // 3 is open on the left at mid-height → low density (0.10-0.19)
             let mid_left = segment_region_density(
-                binary, width, height, x_start, x_end,
+                binary,
+                width,
+                height,
+                x_start,
+                x_end,
                 (0.0, 0.20, 0.30, 0.70),
             );
-            if mid_left > 0.25 { 8 } else { 3 }
+            if mid_left > 0.25 {
+                8
+            } else {
+                3
+            }
         }
         (0, 9) => {
             // 0 vs 9: check bottom-left quadrant (left 50%, bottom 40%)
             // 0 has closed bottom-left (higher density ~0.31), 9 has open bottom-left
             let bl_density = segment_region_density(
-                binary, width, height, x_start, x_end,
+                binary,
+                width,
+                height,
+                x_start,
+                x_end,
                 (0.0, 0.50, 0.60, 1.0),
             );
-            if bl_density > 0.17 { 0 } else { 9 }
+            if bl_density > 0.17 {
+                0
+            } else {
+                9
+            }
         }
         _ => best_label,
     }
@@ -683,8 +707,15 @@ pub fn recognize_timer_from_binary(binary: &[u8], width: u32, height: u32) -> Op
             }
         }
         let final_label = disambiguate_digit(
-            binary, width, height, s, e,
-            best_label, best_score, second_label, second_score,
+            binary,
+            width,
+            height,
+            s,
+            e,
+            best_label,
+            best_score,
+            second_label,
+            second_score,
         );
         digits.push(final_label);
 
@@ -749,7 +780,8 @@ mod tests {
         let rgb_data = rgb_img.into_raw();
 
         // Detect and crop black bars (content anchored at top-left)
-        let (cw, ch) = crate::core::visual_intercept::detect_content_bounds(&rgb_data, width, height, 3);
+        let (cw, ch) =
+            crate::core::visual_intercept::detect_content_bounds(&rgb_data, width, height, 3);
         let mut cropped = Vec::with_capacity((cw * ch * 3) as usize);
         for y in 0..ch {
             let start = (y * width * 3) as usize;
@@ -769,9 +801,21 @@ mod tests {
         // Content-relative ROI: x=85.39%-93.42%, y=3.60%-6.51%
         let expected_w = ((width as f32 * 0.9342) as u32) - ((width as f32 * 0.8539) as u32);
         let expected_h = ((height as f32 * 0.0651) as u32) - ((height as f32 * 0.0360) as u32);
-        assert_eq!(crop_w, expected_w, "ROI width mismatch for {}x{}", width, height);
-        assert_eq!(crop_h, expected_h, "ROI height mismatch for {}x{}", width, height);
-        assert_eq!(cropped.len(), (crop_w * crop_h * 3) as usize, "RGB data size mismatch");
+        assert_eq!(
+            crop_w, expected_w,
+            "ROI width mismatch for {}x{}",
+            width, height
+        );
+        assert_eq!(
+            crop_h, expected_h,
+            "ROI height mismatch for {}x{}",
+            width, height
+        );
+        assert_eq!(
+            cropped.len(),
+            (crop_w * crop_h * 3) as usize,
+            "RGB data size mismatch"
+        );
     }
 
     #[test]
@@ -787,7 +831,11 @@ mod tests {
         // SKEW_FACTOR=0.25: max_shift = ceil(crop_h * 0.25)
         let max_shift = (crop_h as f32 * SKEW_FACTOR).ceil() as u32;
         let expected_w = crop_w + max_shift;
-        assert_eq!(new_w, expected_w, "Expected skew-corrected width {}", expected_w);
+        assert_eq!(
+            new_w, expected_w,
+            "Expected skew-corrected width {}",
+            expected_w
+        );
         assert_eq!(new_h, crop_h, "Height should remain {}", crop_h);
         assert_eq!(corrected.len(), (new_w * new_h * 3) as usize);
     }
@@ -958,8 +1006,11 @@ mod tests {
         let (rgb_data, width, height) = load_test_image("battle-active.png");
         let (processed, proc_w, proc_h) = process_timer_region(&rgb_data, width, height);
         let threshold = calculate_adaptive_threshold(&processed, proc_w, proc_h);
-        assert!(threshold >= 150,
-            "High-contrast timer text should produce threshold >= 150, got {}", threshold);
+        assert!(
+            threshold >= 150,
+            "High-contrast timer text should produce threshold >= 150, got {}",
+            threshold
+        );
     }
 
     #[test]
@@ -1027,16 +1078,17 @@ mod tests {
                         failures.push(format!(
                             "{}: Expected {:02}:{:02}.{:03}, Got {:02}:{:02}.{:03}",
                             filename,
-                            exp_min, exp_sec, exp_ms,
-                            timer.minutes, timer.seconds, timer.milliseconds
+                            exp_min,
+                            exp_sec,
+                            exp_ms,
+                            timer.minutes,
+                            timer.seconds,
+                            timer.milliseconds
                         ));
                     }
                 }
                 None => {
-                    failures.push(format!(
-                        "{}: Failed to recognize (None)",
-                        filename
-                    ));
+                    failures.push(format!("{}: Failed to recognize (None)", filename));
                 }
             }
         }
@@ -1055,7 +1107,11 @@ mod tests {
             for fail in &failures {
                 eprintln!("  {}", fail);
             }
-            panic!("OCR accuracy test failed: {}/{} failed", failures.len(), total);
+            panic!(
+                "OCR accuracy test failed: {}/{} failed",
+                failures.len(),
+                total
+            );
         }
     }
 
@@ -1208,7 +1264,9 @@ mod tests {
     /// Load a grayscale PNG template from file path, return GrayImage
     #[allow(dead_code)] // Used by ignored tool tests
     fn load_gray_template(path: &std::path::Path) -> GrayImage {
-        image::open(path).expect("Failed to load template").to_luma8()
+        image::open(path)
+            .expect("Failed to load template")
+            .to_luma8()
     }
 
     #[test]
@@ -1229,7 +1287,10 @@ mod tests {
 
         let binary = binarize_for_ocr(&rgb_data, width, height);
         let threshold = (height as f32 * COLUMN_THRESHOLD_RATIO) as u32;
-        eprintln!("Column threshold: {} (height={}, ratio={})", threshold, height, COLUMN_THRESHOLD_RATIO);
+        eprintln!(
+            "Column threshold: {} (height={}, ratio={})",
+            threshold, height, COLUMN_THRESHOLD_RATIO
+        );
 
         // Dump column densities
         eprintln!("\nColumn density (white pixel count per column):");
@@ -1262,10 +1323,7 @@ mod tests {
         eprintln!("\nSegments ({}): {:?}", segments.len(), segments);
 
         // Save binarized image for visual inspection
-        let output_dir = PathBuf::from(manifest_dir)
-            .parent()
-            .unwrap()
-            .join("output");
+        let output_dir = PathBuf::from(manifest_dir).parent().unwrap().join("output");
         let _ = std::fs::create_dir_all(&output_dir);
         image::save_buffer(
             output_dir.join("diag_03-45-100_binary.png"),
@@ -1356,14 +1414,15 @@ mod tests {
                 for y in 0..height {
                     for x in *start..=*end {
                         let pixel_idx = (y * width + x) as usize;
-                        seg_buf.push(if pixel_idx < binary.len() { binary[pixel_idx] } else { 0 });
+                        seg_buf.push(if pixel_idx < binary.len() {
+                            binary[pixel_idx]
+                        } else {
+                            0
+                        });
                     }
                 }
 
-                let out_name = format!(
-                    "{}_sample{}_{}.png",
-                    label, counts[idx], content
-                );
+                let out_name = format!("{}_sample{}_{}.png", label, counts[idx], content);
                 image::save_buffer(
                     output_dir.join(&out_name),
                     &seg_buf,
@@ -1375,7 +1434,10 @@ mod tests {
             }
         }
 
-        eprintln!("Extraction complete. Counts (0-9, colon, dot): {:?}", counts);
+        eprintln!(
+            "Extraction complete. Counts (0-9, colon, dot): {:?}",
+            counts
+        );
         eprintln!("Output: output/min-digits/");
     }
 
@@ -1392,11 +1454,18 @@ mod tests {
             let result = recognize_timer(&rgb_data, width, height);
             if let Some(timer) = result {
                 println!("{} ({}x{}): {}", filename, width, height, timer.to_string());
-                assert!(timer.minutes <= 59 && timer.seconds <= 59 && timer.milliseconds <= 999,
-                    "{}: invalid timer values {:?}", filename, timer);
+                assert!(
+                    timer.minutes <= 59 && timer.seconds <= 59 && timer.milliseconds <= 999,
+                    "{}: invalid timer values {:?}",
+                    filename,
+                    timer
+                );
                 success += 1;
             } else {
-                println!("{} ({}x{}): OCR returned None (expected at min resolution)", filename, width, height);
+                println!(
+                    "{} ({}x{}): OCR returned None (expected at min resolution)",
+                    filename, width, height
+                );
             }
         }
         println!("Timer OCR at min resolution: {}/3 succeeded", success);
@@ -1411,7 +1480,8 @@ mod tests {
 
         // ===== Test normal resolution (active/) =====
         eprintln!("=== Normal Resolution (active/) ===");
-        let active_dir = PathBuf::from(manifest_dir).join("tests/fixtures/countdown_monitor/active");
+        let active_dir =
+            PathBuf::from(manifest_dir).join("tests/fixtures/countdown_monitor/active");
         let mut norm_total = 0;
         let mut norm_passed = 0;
         let mut norm_failures: Vec<String> = Vec::new();
@@ -1423,11 +1493,18 @@ mod tests {
             for entry in sorted {
                 let path = entry.path();
                 let filename = path.file_name().unwrap().to_str().unwrap().to_string();
-                if !filename.ends_with(".png") { continue; }
+                if !filename.ends_with(".png") {
+                    continue;
+                }
 
-                let content = filename.replace("binary_", "").replace("failed_", "").replace(".png", "");
+                let content = filename
+                    .replace("binary_", "")
+                    .replace("failed_", "")
+                    .replace(".png", "");
                 let parts: Vec<&str> = content.split('-').collect();
-                if parts.len() != 3 { continue; }
+                if parts.len() != 3 {
+                    continue;
+                }
 
                 norm_total += 1;
                 let exp_min: u8 = parts[0].parse().unwrap_or(0);
@@ -1435,17 +1512,26 @@ mod tests {
                 let exp_ms: u16 = parts[2].parse().unwrap_or(0);
 
                 let img = image::open(&path).expect("open").to_luma8();
-                let w = img.width(); let h = img.height();
+                let w = img.width();
+                let h = img.height();
                 let binary = img.into_vec();
 
                 match recognize_timer_from_binary(&binary, w, h) {
                     Some(timer) => {
-                        if timer.minutes == exp_min && timer.seconds == exp_sec && timer.milliseconds == exp_ms {
+                        if timer.minutes == exp_min
+                            && timer.seconds == exp_sec
+                            && timer.milliseconds == exp_ms
+                        {
                             norm_passed += 1;
                         } else {
                             norm_failures.push(format!(
                                 "{}: exp {:02}:{:02}.{:03}, got {}",
-                                filename, exp_min, exp_sec, exp_ms, timer.to_string()));
+                                filename,
+                                exp_min,
+                                exp_sec,
+                                exp_ms,
+                                timer.to_string()
+                            ));
                         }
                     }
                     None => {
@@ -1456,11 +1542,14 @@ mod tests {
         }
 
         eprintln!("Normal: {}/{} passed", norm_passed, norm_total);
-        for f in &norm_failures { eprintln!("  FAIL: {}", f); }
+        for f in &norm_failures {
+            eprintln!("  FAIL: {}", f);
+        }
 
         // ===== Test min resolution (min-active/) =====
         eprintln!("\n=== Min Resolution (min-active/) ===");
-        let min_dir = PathBuf::from(manifest_dir).join("tests/fixtures/countdown_monitor/min-active");
+        let min_dir =
+            PathBuf::from(manifest_dir).join("tests/fixtures/countdown_monitor/min-active");
         let mut min_total = 0;
         let mut min_passed = 0;
         let mut min_seg_fails = 0;
@@ -1473,11 +1562,15 @@ mod tests {
             for entry in sorted {
                 let path = entry.path();
                 let filename = path.file_name().unwrap().to_str().unwrap().to_string();
-                if !filename.ends_with(".png") { continue; }
+                if !filename.ends_with(".png") {
+                    continue;
+                }
 
                 let content = filename.replace(".png", "");
                 let parts: Vec<&str> = content.split('-').collect();
-                if parts.len() != 3 { continue; }
+                if parts.len() != 3 {
+                    continue;
+                }
 
                 min_total += 1;
                 let exp_min: u8 = parts[0].parse().unwrap_or(0);
@@ -1485,17 +1578,26 @@ mod tests {
                 let exp_ms: u16 = parts[2].parse().unwrap_or(0);
 
                 let rgb_img = image::open(&path).expect("open").to_rgb8();
-                let w = rgb_img.width(); let h = rgb_img.height();
+                let w = rgb_img.width();
+                let h = rgb_img.height();
                 let binary = binarize_for_ocr(&rgb_img.into_raw(), w, h);
 
                 match recognize_timer_from_binary(&binary, w, h) {
                     Some(timer) => {
-                        if timer.minutes == exp_min && timer.seconds == exp_sec && timer.milliseconds == exp_ms {
+                        if timer.minutes == exp_min
+                            && timer.seconds == exp_sec
+                            && timer.milliseconds == exp_ms
+                        {
                             min_passed += 1;
                         } else {
                             min_rec_failures.push(format!(
                                 "{}: exp {:02}:{:02}.{:03}, got {}",
-                                filename, exp_min, exp_sec, exp_ms, timer.to_string()));
+                                filename,
+                                exp_min,
+                                exp_sec,
+                                exp_ms,
+                                timer.to_string()
+                            ));
                         }
                     }
                     None => {
@@ -1507,19 +1609,36 @@ mod tests {
         }
 
         let min_recognized = min_total - min_seg_fails;
-        eprintln!("\nMin: {}/{} recognized, {}/{} passed",
-            min_recognized, min_total, min_passed, min_recognized);
-        for f in &min_rec_failures { eprintln!("  FAIL: {}", f); }
+        eprintln!(
+            "\nMin: {}/{} recognized, {}/{} passed",
+            min_recognized, min_total, min_passed, min_recognized
+        );
+        for f in &min_rec_failures {
+            eprintln!("  FAIL: {}", f);
+        }
 
         eprintln!("\n=== Summary ===");
-        eprintln!("Normal: {}/{} (recognition accuracy)", norm_passed, norm_total);
-        eprintln!("Min: segmentation {}/{}, recognition {}/{}",
-            min_recognized, min_total, min_passed, min_recognized);
+        eprintln!(
+            "Normal: {}/{} (recognition accuracy)",
+            norm_passed, norm_total
+        );
+        eprintln!(
+            "Min: segmentation {}/{}, recognition {}/{}",
+            min_recognized, min_total, min_passed, min_recognized
+        );
 
         // Assert: normal resolution must be perfect, min recognition must be perfect
-        assert_eq!(norm_failures.len(), 0,
-            "Normal resolution failures: {:?}", norm_failures);
-        assert_eq!(min_rec_failures.len(), 0,
-            "Min resolution recognition failures: {:?}", min_rec_failures);
+        assert_eq!(
+            norm_failures.len(),
+            0,
+            "Normal resolution failures: {:?}",
+            norm_failures
+        );
+        assert_eq!(
+            min_rec_failures.len(),
+            0,
+            "Min resolution recognition failures: {:?}",
+            min_rec_failures
+        );
     }
 }
